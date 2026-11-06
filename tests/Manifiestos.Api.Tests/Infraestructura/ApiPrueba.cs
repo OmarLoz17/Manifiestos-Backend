@@ -28,6 +28,9 @@ public sealed class ValidadorFicticio : IValidadorTokenGoogle
 
 public sealed class ApiPrueba(BaseDatosPrueba bd) : WebApplicationFactory<Program>
 {
+    /// <summary>Organización que atiende la API de prueba (la de BaseDatosPrueba salvo que la prueba siembre otra).</summary>
+    public Guid Organizacion { get; init; } = BaseDatosPrueba.Organizacion;
+
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
         // "Testing" evita cargar User Secrets del desarrollador.
@@ -37,7 +40,7 @@ public sealed class ApiPrueba(BaseDatosPrueba bd) : WebApplicationFactory<Progra
         // CadenaConexion sustituiría el nombre de la base y la API de prueba escribiría fuera de la temporal.
         builder.UseSetting("Manifiestos:BaseDatos", bd.Nombre);
         builder.UseSetting("Acceso:GoogleClientId", "cliente-ficticio.apps.googleusercontent.com");
-        builder.UseSetting("Acceso:OrganizacionId", BaseDatosPrueba.Organizacion.ToString());
+        builder.UseSetting("Acceso:OrganizacionId", Organizacion.ToString());
         builder.UseSetting("Acceso:IntentosPorMinuto", "1000");
         builder.ConfigureTestServices(s => s.AddSingleton<IValidadorTokenGoogle, ValidadorFicticio>());
     }

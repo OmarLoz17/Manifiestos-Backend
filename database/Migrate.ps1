@@ -1,7 +1,7 @@
 param([string]$Database = 'manifiestos')
 $ErrorActionPreference = 'Stop'
 # Solo la base local, la demo (database/demo) y las temporales de prueba.
-if ($Database -cnotmatch '^manifiestos(?:_test_[a-z0-9_]+|_demo)?$') { throw 'Base no permitida por el ejecutor local.' }
+if ($Database -cnotmatch '^manifiestos(?:_test_[a-z0-9_]+|_demo|_ejemplo)?$') { throw 'Base no permitida por el ejecutor local.' }
 $root = Split-Path $PSScriptRoot -Parent
 $compose = Join-Path $root 'compose.yaml'
 $files = @(Get-ChildItem (Join-Path $PSScriptRoot 'migrations') -Filter '*.sql' | Sort-Object Name)
