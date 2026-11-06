@@ -253,6 +253,30 @@ JOIN negocio.ficha_vehiculo fv ON fv.vehiculo_id = pg_temp.uid('unidad:' || m.un
 JOIN catalogo.capacidad_vehiculo cap ON cap.id = fv.capacidad_id;
 DROP TABLE demo_manifiesto;
 
+-- ---------------- Incidencias (ficticias) ----------------
+-- Reportadas desde la app cuando no se pudo hacer la orden (fosa) o se hizo parcial (sanitarios).
+-- Nacen «abiertas» (trigger de 0016); dos reciben seguimiento. Sin fotos: el almacenamiento aún no existe.
+CREATE TEMP TABLE demo_incidencia (clave text, servicio text, motivo text, descripcion text, fecha timestamptz,
+    ruta text, posicion int, cliente text, unidad text, operador text, asignados int, atendidos int);
+INSERT INTO demo_incidencia VALUES
+    ('i1', 'fosa', 'sin_acceso', 'No se permitió el acceso al predio: el portón estaba cerrado.', '2026-11-05 11:10-06', 'r1', 3, 'a3', 'u1', 'p1', NULL, NULL),
+    ('i2', 'fosa', 'unidad_danada', 'La unidad presentó una falla en la bomba; no se pudo realizar el servicio.', '2026-11-04 09:15-06', 'r2', 1, 'a5', 'u2', 'p2', NULL, NULL),
+    ('i3', 'fosa', 'cliente_ausente', 'El cliente no se encontraba en el domicilio.', '2026-11-03 16:12-06', 'r3', 2, 'a8', 'u3', 'p3', NULL, NULL),
+    ('i4', 'sanitario', 'servicio_parcial', 'Cuatro baños estaban bloqueados por material de obra.', '2026-11-05 10:24-06', 'r1', 1, 'a1', 'u1', 'p1', 12, 8),
+    ('i5', 'sanitario', 'servicio_parcial', 'Evento en curso; solo se limpiaron los baños accesibles.', '2026-11-04 14:36-06', 'r3', 2, 'a8', 'u3', 'p3', 10, 6);
+INSERT INTO negocio.incidencia (organizacion_id, sucursal_id, id, servicio, motivo, descripcion, ocurrida_en, ruta_id, parada_id,
+    cliente_id, vehiculo_id, persona_id, banos_asignados, banos_atendidos, latitud, longitud, precision_m)
+SELECT 'de000000-0000-4000-8000-000000000001', 'de000000-0000-4000-8000-000000000003', pg_temp.uid('incidencia:' || clave),
+    servicio, motivo, descripcion, fecha, pg_temp.uid('ruta:' || ruta), pg_temp.uid('parada:' || ruta || ':' || posicion),
+    pg_temp.uid('cliente:' || cliente), pg_temp.uid('unidad:' || unidad), pg_temp.uid('persona:' || operador), asignados, atendidos,
+    25.68 + random() * 0.05, -100.33 + random() * 0.05, 8
+FROM demo_incidencia ORDER BY fecha;
+INSERT INTO negocio.seguimiento_incidencia (organizacion_id, sucursal_id, incidencia_id, revision, estatus, comentario) VALUES
+    ('de000000-0000-4000-8000-000000000001', 'de000000-0000-4000-8000-000000000003', pg_temp.uid('incidencia:i1'), 2, 'en_proceso', 'Se llamó al encargado de la planta para reprogramar.'),
+    ('de000000-0000-4000-8000-000000000001', 'de000000-0000-4000-8000-000000000003', pg_temp.uid('incidencia:i2'), 2, 'en_proceso', 'Unidad enviada a taller.'),
+    ('de000000-0000-4000-8000-000000000001', 'de000000-0000-4000-8000-000000000003', pg_temp.uid('incidencia:i3'), 2, 'cerrada', 'Se atendió al día siguiente.');
+DROP TABLE demo_incidencia;
+
 DROP TABLE demo_cliente, demo_unidad, demo_punto, demo_parada;
 COMMIT;
 
