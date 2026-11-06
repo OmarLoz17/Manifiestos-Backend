@@ -7,11 +7,11 @@ public sealed record AsignacionCliente(Guid RutaId, string RutaNombre, Guid Para
 
 public sealed record SitioCliente(Guid SitioId, int Revision, int RevisionFicha,
     string? Nombre, string? Calle, string? NumeroExterior, string? Colonia, string? CodigoPostal,
-    string? Municipio, string? Estado, int? Banos, int? Fosas, bool EnRuta = false);
+    string? Municipio, string? Estado, int? Banos, int? Fosas, bool EnRuta = false, bool FosaPropia = false);
 
 public sealed record SolicitudSitioCliente(Guid? SitioId, int? Revision, int? RevisionFicha,
     string? Nombre, string? Calle, string? NumeroExterior, string? Colonia, string? CodigoPostal,
-    string? Municipio, string? Estado, int? Banos, int? Fosas, bool Eliminar = false);
+    string? Municipio, string? Estado, int? Banos, int? Fosas, bool Eliminar = false, bool FosaPropia = false);
 public sealed record SolicitudGuardarSitios(SolicitudSitioCliente[]? Sitios);
 
 /// <summary>

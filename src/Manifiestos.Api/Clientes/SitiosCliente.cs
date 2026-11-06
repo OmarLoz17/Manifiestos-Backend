@@ -18,7 +18,8 @@ public static class SitiosCliente
                        WHERE (pv.organizacion_id,pv.sucursal_id,pv.parada_id)=(p.organizacion_id,p.sucursal_id,p.id)
                        ORDER BY pv.revision DESC LIMIT 1) v ON v.sitio_id=cs.sitio_id
                      JOIN negocio.parada_cliente pc ON (pc.organizacion_id,pc.sucursal_id,pc.version_id)=(p.organizacion_id,p.sucursal_id,v.id)
-                     WHERE p.organizacion_id=cs.organizacion_id AND p.sucursal_id=cs.sucursal_id AND pc.cliente_id=cs.cliente_id)
+                     WHERE p.organizacion_id=cs.organizacion_id AND p.sucursal_id=cs.sucursal_id AND pc.cliente_id=cs.cliente_id),
+                   cs.fosa_propia
             FROM (SELECT DISTINCT ON (organizacion_id,sucursal_id,cliente_id,sitio_id) *
                   FROM negocio.cliente_sitio WHERE organizacion_id=$1
                     AND ($2::uuid='00000000-0000-0000-0000-000000000000'::uuid OR cliente_id=$2)
@@ -36,7 +37,7 @@ public static class SitiosCliente
             var clave = (r.GetGuid(0),r.GetGuid(1));
             if (!lista.TryGetValue(clave,out var sitios)) lista[clave]=sitios=[];
             sitios.Add(new SitioCliente(r.GetGuid(2),r.GetInt32(3),r.GetInt32(4),T(5),T(6),T(7),T(8),T(9),T(10),T(11),
-                r.IsDBNull(12)?null:r.GetInt32(12),r.IsDBNull(13)?null:r.GetInt32(13),r.GetBoolean(14)));
+                r.IsDBNull(12)?null:r.GetInt32(12),r.IsDBNull(13)?null:r.GetInt32(13),r.GetBoolean(14),r.GetBoolean(15)));
         }
         return lista;
     }
@@ -63,9 +64,9 @@ public static class SitiosCliente
                 if (actual is null) return ResultadoEscritura.Invalida("La dirección todavía no está registrada.");
                 if (actual.EnRuta) return ResultadoEscritura.Invalida("No puedes eliminar una dirección que se usa en una ruta para este cliente.");
                 await using var baja=tx.Comando("""
-                    INSERT INTO negocio.cliente_sitio (organizacion_id,sucursal_id,cliente_id,sitio_id,revision,activo,banos_registrados,fosas_registradas)
-                    VALUES ($1,$2,$3,$4,$5,false,$6::int,$7::int)
-                    """,org,suc,cliente,actual.SitioId,actual.Revision+1,N(actual.Banos),N(actual.Fosas));
+                    INSERT INTO negocio.cliente_sitio (organizacion_id,sucursal_id,cliente_id,sitio_id,revision,activo,banos_registrados,fosas_registradas,fosa_propia)
+                    VALUES ($1,$2,$3,$4,$5,false,$6::int,$7::int,$8)
+                    """,org,suc,cliente,actual.SitioId,actual.Revision+1,N(actual.Banos),N(actual.Fosas),actual.FosaPropia);
                 await baja.ExecuteNonQueryAsync(ct);
                 continue;
             }
@@ -92,12 +93,12 @@ public static class SitiosCliente
                     """,org,suc,id,(actual?.RevisionFicha??0)+1,N(s.Nombre),N(s.Calle),N(s.NumeroExterior),N(s.Colonia),N(s.CodigoPostal),N(s.Municipio),N(s.Estado));
                 await ficha.ExecuteNonQueryAsync(ct);
             }
-            if (actual is null || actual.Banos!=s.Banos || actual.Fosas!=s.Fosas)
+            if (actual is null || actual.Banos!=s.Banos || actual.Fosas!=s.Fosas || actual.FosaPropia!=s.FosaPropia)
             {
                 await using var vinculo=tx.Comando("""
-                    INSERT INTO negocio.cliente_sitio (organizacion_id,sucursal_id,cliente_id,sitio_id,revision,banos_registrados,fosas_registradas)
-                    VALUES ($1,$2,$3,$4,$5,$6::int,$7::int)
-                    """,org,suc,cliente,id,(actual?.Revision??0)+1,N(s.Banos),N(s.Fosas));
+                    INSERT INTO negocio.cliente_sitio (organizacion_id,sucursal_id,cliente_id,sitio_id,revision,banos_registrados,fosas_registradas,fosa_propia)
+                    VALUES ($1,$2,$3,$4,$5,$6::int,$7::int,$8)
+                    """,org,suc,cliente,id,(actual?.Revision??0)+1,N(s.Banos),N(s.Fosas),s.FosaPropia);
                 await vinculo.ExecuteNonQueryAsync(ct);
             }
         }
