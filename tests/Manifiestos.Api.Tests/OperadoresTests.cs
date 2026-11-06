@@ -57,8 +57,17 @@ public sealed class OperadoresTests : IClassFixture<BaseDatosPrueba>, IAsyncLife
     private static async Task<OperadorFicha> OperadorAsync(HttpClient nav, Guid id) =>
         Assert.Single(await ListarAsync(nav), x => x.Id == id);
 
-    private static object Nuevo(string nombre, string? cargo = "Chofer - Operador") => new { sucursalId = Suc, nombre, cargo };
-    private static object Edicion(int revision, string nombre, string? cargo = "Chofer - Operador") => new { sucursalId = Suc, nombre, cargo, revision };
+    private static object Nuevo(string nombre, string? cargo = "Chofer - Operador", string? correo = null) => new { sucursalId = Suc, nombre, cargo, correo };
+    private static object Edicion(int revision, string nombre, string? cargo = "Chofer - Operador", string? correo = null) => new { sucursalId = Suc, nombre, cargo, correo, revision };
+    private static string Cuenta() => $"telefono-{Guid.NewGuid():N}@example.invalid";
+    private Task<string> EstadoCuentaAsync(string correo) => _bd.ConsultarAsync(
+        $"SELECT coalesce(string_agg(rol_codigo || ':' || activo, ','), 'sin entrada') FROM seguridad.acceso_autorizado WHERE correo_permitido = '{correo}'");
+    /// <summary>El inicio de sesión web de la cuenta debe ser rechazado: es un teléfono, no Operaciones.</summary>
+    private async Task AfirmarSinPanelAsync(string correo)
+    {
+        using var nav = _api.NuevoNavegador();
+        Assert.Equal(HttpStatusCode.Forbidden, (await nav.EntrarAsync(ValidadorFicticio.Token($"s-{correo}", correo))).StatusCode);
+    }
 
     private static async Task<RevisionGuardada> CrearAsync(HttpClient nav, object cuerpo)
     {
@@ -189,5 +198,73 @@ public sealed class OperadoresTests : IClassFixture<BaseDatosPrueba>, IAsyncLife
         var enAjena = await EnviarAsync(nav, HttpMethod.Put, $"/api/operadores/{ajena}", new { sucursalId = Suc2, nombre = "Intento", revision = 1 });
         Assert.Equal(HttpStatusCode.Forbidden, enAjena.StatusCode);
         Assert.Equal(nombre, await _bd.ConsultarAsync($"SELECT nombre_completo FROM negocio.operador_ficha WHERE persona_id = '{ajena}'"));
+    }
+
+    [Fact]
+    public async Task La_cuenta_del_operador_se_autoriza_para_el_telefono_sin_abrir_el_panel_y_se_retira_al_quitarla()
+    {
+        using var nav = await SesionAsync(true);
+        var correo = Cuenta();
+        var creado = await CrearAsync(nav, Nuevo($"Operador Ficticio {Guid.NewGuid():N}"[..28], correo: $"  {correo.ToUpperInvariant()} "));
+        Assert.Equal(correo, (await OperadorAsync(nav, creado.Id)).Correo);
+        Assert.Equal("telefono_operador:true", await EstadoCuentaAsync(correo));
+        await AfirmarSinPanelAsync(correo);
+        // La cuenta no recibe permisos de datos: la app móvil los definirá con su inicio de sesión.
+        Assert.Equal("0", await _bd.ConsultarAsync($"SELECT count(*) FROM seguridad.permiso_sucursal p JOIN seguridad.acceso_autorizado a ON a.id = p.acceso_id WHERE a.correo_permitido = '{correo}'"));
+
+        // Sin cambios no hay revisión; quitar la cuenta crea la revisión 2 y la desactiva.
+        var url = $"/api/operadores/{creado.Id}";
+        var o = await OperadorAsync(nav, creado.Id);
+        Assert.Equal(1, (await (await EnviarAsync(nav, HttpMethod.Put, url, Edicion(1, o.Nombre, o.Cargo, correo))).Content.ReadFromJsonAsync<RevisionGuardada>())!.Revision);
+        Assert.Equal(2, (await (await EnviarAsync(nav, HttpMethod.Put, url, Edicion(1, o.Nombre, o.Cargo, null))).Content.ReadFromJsonAsync<RevisionGuardada>())!.Revision);
+        Assert.Null((await OperadorAsync(nav, creado.Id)).Correo);
+        Assert.Equal("telefono_operador:false", await EstadoCuentaAsync(correo));
+        // El historial conserva quién tuvo la cuenta.
+        Assert.Equal("1", await _bd.ConsultarAsync($"SELECT count(*) FROM negocio.operador_ficha WHERE persona_id = '{creado.Id}' AND correo = '{correo}'"));
+        await AfirmarSinPanelAsync(correo);
+    }
+
+    [Fact]
+    public async Task Una_cuenta_no_se_comparte_se_reasigna_quitandosela_antes_y_no_toca_cuentas_de_operaciones()
+    {
+        using var nav = await SesionAsync(true);
+        var correo = Cuenta();
+        var a = await CrearAsync(nav, Nuevo($"Operador A {Guid.NewGuid():N}"[..24], correo: correo));
+        var antes = await _bd.ConsultarAsync("SELECT count(*) FROM seguridad.persona");
+        // Otro operador no puede tomar una cuenta que otro tiene hoy; nada se crea.
+        await AfirmarErrorAsync(await EnviarAsync(nav, HttpMethod.Post, "/api/operadores", Nuevo("Operador B", correo: correo)), HttpStatusCode.BadRequest, RepositorioOperadores.MensajeCorreoEnUso);
+        Assert.Equal(antes, await _bd.ConsultarAsync("SELECT count(*) FROM seguridad.persona"));
+        var b = await CrearAsync(nav, Nuevo($"Operador B {Guid.NewGuid():N}"[..24]));
+        await AfirmarErrorAsync(await EnviarAsync(nav, HttpMethod.Put, $"/api/operadores/{b.Id}", Edicion(1, "Operador B", correo: correo)), HttpStatusCode.BadRequest, RepositorioOperadores.MensajeCorreoEnUso);
+        Assert.Equal("telefono_operador:true", await EstadoCuentaAsync(correo));
+
+        // Se le quita a A y B la recibe: la cuenta sigue autorizada y el historial de A se conserva.
+        Assert.Equal(HttpStatusCode.OK, (await EnviarAsync(nav, HttpMethod.Put, $"/api/operadores/{a.Id}", Edicion(1, (await OperadorAsync(nav, a.Id)).Nombre, correo: null))).StatusCode);
+        Assert.Equal("telefono_operador:false", await EstadoCuentaAsync(correo));
+        Assert.Equal(HttpStatusCode.OK, (await EnviarAsync(nav, HttpMethod.Put, $"/api/operadores/{b.Id}", Edicion(1, "Operador B", correo: correo))).StatusCode);
+        Assert.Equal("telefono_operador:true", await EstadoCuentaAsync(correo));
+        Assert.Equal(correo, (await OperadorAsync(nav, b.Id)).Correo);
+        Assert.Null((await OperadorAsync(nav, a.Id)).Correo);
+        Assert.Equal("1", await _bd.ConsultarAsync($"SELECT count(*) FROM negocio.operador_ficha WHERE persona_id = '{a.Id}' AND correo = '{correo}'"));
+
+        // Una cuenta de Operaciones (o cualquier otra) no se puede asignar a un operador ni se modifica.
+        var operaciones = $"operaciones-{Guid.NewGuid():N}@example.invalid";
+        await _bd.AutorizarAsync(operaciones, escribir: true);
+        await AfirmarErrorAsync(await EnviarAsync(nav, HttpMethod.Post, "/api/operadores", Nuevo("Operador C", correo: operaciones)), HttpStatusCode.BadRequest, RepositorioOperadores.MensajeCorreoReservado);
+        await AfirmarErrorAsync(await EnviarAsync(nav, HttpMethod.Put, $"/api/operadores/{b.Id}", Edicion(2, "Operador B", correo: operaciones)), HttpStatusCode.BadRequest, RepositorioOperadores.MensajeCorreoReservado);
+        Assert.Equal("operaciones:true", await EstadoCuentaAsync(operaciones));
+        Assert.Equal(correo, (await OperadorAsync(nav, b.Id)).Correo);
+        // La cuenta con que quita B tampoco se retira por error: sigue activa mientras B la tenga.
+        Assert.Equal("telefono_operador:true", await EstadoCuentaAsync(correo));
+    }
+
+    [Fact]
+    public async Task Rechaza_un_correo_con_formato_invalido_sin_crear_nada()
+    {
+        using var nav = await SesionAsync(true);
+        var antes = await _bd.ConsultarAsync("SELECT (SELECT count(*) FROM seguridad.persona) || '|' || (SELECT count(*) FROM seguridad.acceso_autorizado)");
+        foreach (var malo in new[] { "sin-arroba", "a@b", "con espacio@x.mx", "dos@@x.mx" })
+            await AfirmarErrorAsync(await EnviarAsync(nav, HttpMethod.Post, "/api/operadores", Nuevo("Operador D", correo: malo)), HttpStatusCode.BadRequest, RepositorioOperadores.MensajeCorreoInvalido);
+        Assert.Equal(antes, await _bd.ConsultarAsync("SELECT (SELECT count(*) FROM seguridad.persona) || '|' || (SELECT count(*) FROM seguridad.acceso_autorizado)"));
     }
 }

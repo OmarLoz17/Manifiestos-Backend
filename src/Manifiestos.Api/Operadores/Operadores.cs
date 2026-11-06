@@ -11,29 +11,33 @@ public sealed record UnidadDeOperador(Guid Id, string? NumeroEconomico);
 
 /// <summary>Persona conocida en una sucursal. Revisión 0 = todavía sin ficha (solo es operador de una unidad).</summary>
 public sealed record OperadorFicha(
-    Guid Id, Guid SucursalId, int Revision, string Nombre, string? Cargo, IReadOnlyList<UnidadDeOperador> Unidades);
+    Guid Id, Guid SucursalId, int Revision, string Nombre, string? Cargo, string? Correo, IReadOnlyList<UnidadDeOperador> Unidades);
 
 // ---- Solicitudes ----
 
-public sealed record SolicitudNuevoOperador(Guid? SucursalId, string? Nombre, string? Cargo);
-public sealed record SolicitudEditarOperador(Guid? SucursalId, string? Nombre, string? Cargo, int? Revision);
+public sealed record SolicitudNuevoOperador(Guid? SucursalId, string? Nombre, string? Cargo, string? Correo);
+public sealed record SolicitudEditarOperador(Guid? SucursalId, string? Nombre, string? Cargo, string? Correo, int? Revision);
 
 public interface IRepositorioOperadores
 {
     Task<IReadOnlyList<OperadorFicha>> ListarAsync(Guid organizacion, Guid acceso, CancellationToken ct);
-    Task<ResultadoEscritura> CrearAsync(Guid organizacion, Guid acceso, Guid sucursal, string nombre, string? cargo, CancellationToken ct);
-    Task<ResultadoEscritura> EditarAsync(Guid organizacion, Guid acceso, Guid sucursal, Guid persona, string nombre, string? cargo, int revision, CancellationToken ct);
+    Task<ResultadoEscritura> CrearAsync(Guid organizacion, Guid acceso, Guid sucursal, string nombre, string? cargo, string? correo, CancellationToken ct);
+    Task<ResultadoEscritura> EditarAsync(Guid organizacion, Guid acceso, Guid sucursal, Guid persona, string nombre, string? cargo, string? correo, int revision, CancellationToken ct);
 }
 
 /// <summary>
 /// Operadores (migración 0013) con el usuario manifiestos_api. El alta y la corrección pasan por
 /// negocio.alta_operador / negocio.corregir_operador, que exigen datos.escribir en la sucursal y crean
-/// fichas nuevas en lugar de sobrescribir. No se guardan ni muestran correos ni cuentas Google (PG-20, PG-22).
+/// fichas nuevas en lugar de sobrescribir. El correo es la cuenta de Google con la que el operador entra a la app
+/// del teléfono: mantiene su entrada en la lista de autorizados con un rol sin acceso al panel web (migración 0014).
 /// </summary>
 public sealed class RepositorioOperadores(NpgsqlDataSource datos) : IRepositorioOperadores
 {
     public const string MensajeModificado = "Alguien más modificó este operador. Recarga para ver los cambios.";
     public const string MensajeSinNombre = "Escribe el nombre completo del operador.";
+    public const string MensajeCorreoInvalido = "Escribe un correo válido, por ejemplo nombre@gmail.com.";
+    public const string MensajeCorreoEnUso = "Ese correo ya está asignado a otro operador. Quítaselo primero.";
+    public const string MensajeCorreoReservado = "Esa cuenta ya se usa para otro fin en el sistema y no se puede asignar a un operador.";
 
     public async Task<IReadOnlyList<OperadorFicha>> ListarAsync(Guid organizacion, Guid acceso, CancellationToken ct)
     {
@@ -64,7 +68,7 @@ public sealed class RepositorioOperadores(NpgsqlDataSource datos) : IRepositorio
         // Una fila por persona y sucursal donde es conocida: con ficha o como operador (histórico) de una unidad.
         var lista = new List<OperadorFicha>();
         await using (var cmd = tx.Comando("""
-            SELECT p.id, k.sucursal_id, coalesce(f.revision, 0), coalesce(f.nombre_completo, p.nombre_completo), f.cargo
+            SELECT p.id, k.sucursal_id, coalesce(f.revision, 0), coalesce(f.nombre_completo, p.nombre_completo), f.cargo, f.correo
             FROM seguridad.persona p
             JOIN LATERAL (
                 SELECT x.sucursal_id FROM negocio.operador_ficha x WHERE x.organizacion_id = p.organizacion_id AND x.persona_id = p.id
@@ -81,20 +85,20 @@ public sealed class RepositorioOperadores(NpgsqlDataSource datos) : IRepositorio
             while (await r.ReadAsync(ct))
             {
                 var (persona, sucursal) = (r.GetGuid(0), r.GetGuid(1));
-                lista.Add(new OperadorFicha(persona, sucursal, r.GetInt32(2), r.GetString(3), r.IsDBNull(4) ? null : r.GetString(4),
+                lista.Add(new OperadorFicha(persona, sucursal, r.GetInt32(2), r.GetString(3), r.IsDBNull(4) ? null : r.GetString(4), r.IsDBNull(5) ? null : r.GetString(5),
                     unidades.GetValueOrDefault((sucursal, persona)) ?? []));
             }
         await tx.ConfirmarAsync(ct);
         return lista;
     }
 
-    public async Task<ResultadoEscritura> CrearAsync(Guid organizacion, Guid acceso, Guid sucursal, string nombre, string? cargo, CancellationToken ct)
+    public async Task<ResultadoEscritura> CrearAsync(Guid organizacion, Guid acceso, Guid sucursal, string nombre, string? cargo, string? correo, CancellationToken ct)
     {
         await using var tx = await TransaccionContexto.AbrirAsync(datos, organizacion, acceso, ct);
         try
         {
             Guid id;
-            await using (var cmd = tx.Comando("SELECT negocio.alta_operador($1, $2, $3::text, $4::text)", organizacion, sucursal, nombre, (object?)cargo ?? DBNull.Value))
+            await using (var cmd = tx.Comando("SELECT negocio.alta_operador($1, $2, $3::text, $4::text, $5::text)", organizacion, sucursal, nombre, (object?)cargo ?? DBNull.Value, (object?)correo ?? DBNull.Value))
                 id = (Guid)(await cmd.ExecuteScalarAsync(ct))!;
             await tx.ConfirmarAsync(ct);
             return ResultadoEscritura.Correcta(id, 1);
@@ -102,14 +106,14 @@ public sealed class RepositorioOperadores(NpgsqlDataSource datos) : IRepositorio
         catch (PostgresException e) when (Traducir(e) is { } r) { return r; }
     }
 
-    public async Task<ResultadoEscritura> EditarAsync(Guid organizacion, Guid acceso, Guid sucursal, Guid persona, string nombre, string? cargo, int revision, CancellationToken ct)
+    public async Task<ResultadoEscritura> EditarAsync(Guid organizacion, Guid acceso, Guid sucursal, Guid persona, string nombre, string? cargo, string? correo, int revision, CancellationToken ct)
     {
         await using var tx = await TransaccionContexto.AbrirAsync(datos, organizacion, acceso, ct);
         try
         {
             int vigente;
-            await using (var cmd = tx.Comando("SELECT negocio.corregir_operador($1, $2, $3, $4, $5::text, $6::text)",
-                organizacion, sucursal, persona, revision, nombre, (object?)cargo ?? DBNull.Value))
+            await using (var cmd = tx.Comando("SELECT negocio.corregir_operador($1, $2, $3, $4, $5::text, $6::text, $7::text)",
+                organizacion, sucursal, persona, revision, nombre, (object?)cargo ?? DBNull.Value, (object?)correo ?? DBNull.Value))
                 vigente = (int)(await cmd.ExecuteScalarAsync(ct))!;
             await tx.ConfirmarAsync(ct);
             return ResultadoEscritura.Correcta(persona, vigente);
@@ -120,7 +124,10 @@ public sealed class RepositorioOperadores(NpgsqlDataSource datos) : IRepositorio
     private static ResultadoEscritura? Traducir(PostgresException e) => e.SqlState switch
     {
         PostgresErrorCodes.InsufficientPrivilege => ResultadoEscritura.SinPermiso,
-        PostgresErrorCodes.InvalidParameterValue => ResultadoEscritura.Invalida(MensajeSinNombre),
+        PostgresErrorCodes.InvalidParameterValue => ResultadoEscritura.Invalida(
+            e.MessageText.Contains("correo", StringComparison.OrdinalIgnoreCase) ? MensajeCorreoInvalido : MensajeSinNombre),
+        PostgresErrorCodes.CheckViolation => ResultadoEscritura.Invalida(
+            e.MessageText.Contains("reservado", StringComparison.OrdinalIgnoreCase) ? MensajeCorreoReservado : MensajeCorreoEnUso),
         PostgresErrorCodes.SerializationFailure or PostgresErrorCodes.UniqueViolation => ResultadoEscritura.Conflicto(MensajeModificado),
         PostgresErrorCodes.NoDataFound => ResultadoEscritura.NoEncontrada,
         PostgresErrorCodes.ForeignKeyViolation => ResultadoEscritura.Invalida("La sucursal no existe."),
@@ -161,8 +168,8 @@ public static class EndpointsOperadores
     {
         if (!ServiciosAcceso.LeerIds(http.User, out var org, out var acceso)) return Results.Unauthorized();
         if (s.SucursalId is not { } sucursal || sucursal == Guid.Empty) return Error("Falta la sucursal.");
-        if (Validar(s.Nombre, s.Cargo, out var nombre, out var cargo) is { } error) return error;
-        var r = await operadores.CrearAsync(org, acceso, sucursal, nombre!, cargo, http.RequestAborted);
+        if (Validar(s.Nombre, s.Cargo, s.Correo, out var nombre, out var cargo, out var correo) is { } error) return error;
+        var r = await operadores.CrearAsync(org, acceso, sucursal, nombre!, cargo, correo, http.RequestAborted);
         return Responder(r, creado: true, $"/api/operadores/{r.Id}");
     }
 
@@ -170,18 +177,21 @@ public static class EndpointsOperadores
     {
         if (!ServiciosAcceso.LeerIds(http.User, out var org, out var acceso)) return Results.Unauthorized();
         if (s.SucursalId is not { } sucursal || sucursal == Guid.Empty) return Error("Falta la sucursal.");
-        if (Validar(s.Nombre, s.Cargo, out var nombre, out var cargo) is { } error) return error;
+        if (Validar(s.Nombre, s.Cargo, s.Correo, out var nombre, out var cargo, out var correo) is { } error) return error;
         // 0 = la persona todavía no tenía ficha en el listado; la primera se crea con revisión 1.
         if (s.Revision is not >= 0) return Error("Falta la revisión que se editó.");
-        return Responder(await operadores.EditarAsync(org, acceso, sucursal, id, nombre!, cargo, s.Revision.Value, http.RequestAborted), creado: false, null);
+        return Responder(await operadores.EditarAsync(org, acceso, sucursal, id, nombre!, cargo, correo, s.Revision.Value, http.RequestAborted), creado: false, null);
     }
 
-    private static IResult? Validar(string? nombre, string? cargo, out string? n, out string? c)
+    private static IResult? Validar(string? nombre, string? cargo, string? correoEntrada, out string? n, out string? c, out string? correo)
     {
         n = string.IsNullOrWhiteSpace(nombre) ? null : nombre.Trim();
         c = string.IsNullOrWhiteSpace(cargo) ? null : cargo.Trim();
+        correo = string.IsNullOrWhiteSpace(correoEntrada) ? null : correoEntrada.Trim().ToLowerInvariant();
         if (n is null) return Error(RepositorioOperadores.MensajeSinNombre);
-        if (n.Length > LargoMaximoCampo || c?.Length > LargoMaximoCampo) return Error($"Cada dato del operador admite hasta {LargoMaximoCampo} caracteres.");
+        if (n.Length > LargoMaximoCampo || c?.Length > LargoMaximoCampo || correo?.Length > LargoMaximoCampo)
+            return Error($"Cada dato del operador admite hasta {LargoMaximoCampo} caracteres.");
+        if (correo is not null && !Clientes.EndpointsClientes.CorreoValido(correo)) return Error(RepositorioOperadores.MensajeCorreoInvalido);
         return null;
     }
 
