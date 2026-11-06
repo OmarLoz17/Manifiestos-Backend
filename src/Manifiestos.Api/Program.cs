@@ -1,3 +1,4 @@
+using Manifiestos.Api;
 using Manifiestos.Api.Acceso;
 using Manifiestos.Api.Clientes;
 using Manifiestos.Api.Rutas;
@@ -5,6 +6,7 @@ using Manifiestos.Api.Geografia;
 
 var builder = WebApplication.CreateBuilder(args);
 
+builder.Services.AgregarProxyConfiable(builder.Configuration);
 builder.Services.AgregarAccesoWeb();
 builder.Services.AgregarRutas();
 builder.Services.AgregarClientes();
@@ -12,6 +14,7 @@ builder.Services.AgregarGeografia();
 
 var app = builder.Build();
 
+app.UseForwardedHeaders();
 app.UseAuthentication();
 app.UseAuthorization();
 app.UseRateLimiter();
