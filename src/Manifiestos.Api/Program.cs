@@ -3,6 +3,7 @@ using Manifiestos.Api.Acceso;
 using Manifiestos.Api.Clientes;
 using Manifiestos.Api.Rutas;
 using Manifiestos.Api.Geografia;
+using Manifiestos.Api.Documentos;
 using Manifiestos.Api.Operadores;
 using Manifiestos.Api.Unidades;
 
@@ -15,6 +16,7 @@ builder.Services.AgregarClientes();
 builder.Services.AgregarGeografia();
 builder.Services.AgregarUnidades();
 builder.Services.AgregarOperadores();
+builder.Services.AgregarManifiestos();
 
 var app = builder.Build();
 
@@ -29,6 +31,7 @@ app.MapearClientes();
 app.MapearGeografia();
 app.MapearUnidades();
 app.MapearOperadores();
+app.MapearManifiestos();
 
 app.Run();
 

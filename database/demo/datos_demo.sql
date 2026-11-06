@@ -200,6 +200,59 @@ JOIN negocio.parada_cliente c ON (c.organizacion_id,c.sucursal_id,c.version_id)=
 WHERE p.organizacion_id='de000000-0000-4000-8000-000000000001'
 ON CONFLICT DO NOTHING;
 
+-- ---------------- Manifiestos de fosa fija (ficticios) ----------------
+-- Regla confirmada el 6-nov-2026: en fosa fija con convenio cada orden va con la capacidad máxima de la
+-- unidad (siempre llena). La cantidad es una ESTIMACIÓN por regla, no una medición. Sin firmas ni archivos.
+-- El manifiesto m3 todavía no se descarga en la PTAR y no tiene folio asignado.
+CREATE TEMP TABLE demo_manifiesto (clave text, cliente text, unidad text, folio text, fecha timestamptz, descarga timestamptz);
+INSERT INTO demo_manifiesto VALUES
+    ('m1', 'a1', 'u1', 'MAN-DEMO-0001 (ficticio)', '2026-11-03 09:15-06', '2026-11-03 11:40-06'),
+    ('m2', 'a2', 'u2', 'MAN-DEMO-0002 (ficticio)', '2026-11-04 08:30-06', '2026-11-04 10:55-06'),
+    ('m3', 'a3', 'u3', NULL, '2026-11-05 07:50-06', NULL);
+INSERT INTO negocio.descarga (organizacion_id, sucursal_id, id, cliente_id, ficha_vehiculo_id, ficha_sitio_ptar_id, ocurrida_en)
+SELECT 'de000000-0000-4000-8000-000000000001', 'de000000-0000-4000-8000-000000000003', pg_temp.uid('descarga:' || m.clave),
+    pg_temp.uid('cliente:' || m.cliente),
+    (SELECT f.id FROM negocio.ficha_vehiculo f WHERE f.vehiculo_id = pg_temp.uid('unidad:' || m.unidad) AND f.revision = 1),
+    (SELECT f.id FROM negocio.ficha_sitio f WHERE f.sitio_id = pg_temp.uid('sitio:ptar') AND f.revision = 1),
+    m.descarga
+FROM demo_manifiesto m WHERE m.descarga IS NOT NULL;
+INSERT INTO negocio.manifiesto (organizacion_id, sucursal_id, id, cliente_id, descarga_id)
+SELECT 'de000000-0000-4000-8000-000000000001', 'de000000-0000-4000-8000-000000000003', pg_temp.uid('manifiesto:' || m.clave),
+    pg_temp.uid('cliente:' || m.cliente), CASE WHEN m.descarga IS NOT NULL THEN pg_temp.uid('descarga:' || m.clave) END
+FROM demo_manifiesto m;
+INSERT INTO negocio.version_manifiesto (organizacion_id, sucursal_id, id, manifiesto_id, revision, numero_manifiesto, ficha_vehiculo_id,
+    version_plantilla, instrucciones_seguridad, creada_en)
+SELECT 'de000000-0000-4000-8000-000000000001', 'de000000-0000-4000-8000-000000000003', pg_temp.uid('version:' || m.clave),
+    pg_temp.uid('manifiesto:' || m.clave), 1, m.folio,
+    (SELECT f.id FROM negocio.ficha_vehiculo f WHERE f.vehiculo_id = pg_temp.uid('unidad:' || m.unidad) AND f.revision = 1),
+    'demo-0', 'Instrucciones de seguridad ficticias.', m.fecha
+FROM demo_manifiesto m;
+-- Participantes en la misma transacción que la versión (trigger agregado_inmutable).
+INSERT INTO negocio.participante_manifiesto (organizacion_id, sucursal_id, version_id, rol, empresa_id, ficha_empresa_id, autorizacion_id, origen_domicilio)
+SELECT 'de000000-0000-4000-8000-000000000001', 'de000000-0000-4000-8000-000000000003', pg_temp.uid('version:' || m.clave), 'generador',
+    pg_temp.uid('empresa:' || m.cliente),
+    (SELECT f.id FROM negocio.ficha_empresa f WHERE f.empresa_id = pg_temp.uid('empresa:' || m.cliente) AND f.revision = 1),
+    (SELECT a.id FROM negocio.autorizacion_empresa a WHERE a.empresa_id = pg_temp.uid('empresa:' || m.cliente) AND a.finalidad = 'Generador' LIMIT 1),
+    'fiscal'
+FROM demo_manifiesto m;
+INSERT INTO negocio.participante_manifiesto (organizacion_id, sucursal_id, version_id, rol, empresa_id, ficha_empresa_id, autorizacion_id, origen_domicilio)
+SELECT 'de000000-0000-4000-8000-000000000001', 'de000000-0000-4000-8000-000000000003', pg_temp.uid('version:' || m.clave), 'transportista',
+    'de000000-0000-4000-8000-000000000002',
+    (SELECT f.id FROM negocio.ficha_empresa f WHERE f.empresa_id = 'de000000-0000-4000-8000-000000000002' AND f.revision = 1),
+    (SELECT a.id FROM negocio.autorizacion_empresa a WHERE a.empresa_id = 'de000000-0000-4000-8000-000000000002' AND a.finalidad = 'Transportista' LIMIT 1),
+    'fiscal'
+FROM demo_manifiesto m;
+-- Un renglón por manifiesto: la capacidad de la unidad, estimada por la regla de unidad llena.
+INSERT INTO negocio.detalle_manifiesto (organizacion_id, sucursal_id, version_id, renglon, descripcion_residuo, tipo_contenedor,
+    capacidad_contenedor, unidad_capacidad, numero_contenedores, cantidad, unidad_cantidad, naturaleza_cantidad, metodo_cuantificacion, version_metodo)
+SELECT 'de000000-0000-4000-8000-000000000001', 'de000000-0000-4000-8000-000000000003', pg_temp.uid('version:' || m.clave), 1,
+    'Agua residual de fosa fija (ficticia)', 'Fosa del cliente',
+    cap.valor_m3, 'm3', 1, cap.valor_m3, 'm3', 'estimada', 'capacidad_unidad_llena', '1'
+FROM demo_manifiesto m
+JOIN negocio.ficha_vehiculo fv ON fv.vehiculo_id = pg_temp.uid('unidad:' || m.unidad) AND fv.revision = 1
+JOIN catalogo.capacidad_vehiculo cap ON cap.id = fv.capacidad_id;
+DROP TABLE demo_manifiesto;
+
 DROP TABLE demo_cliente, demo_unidad, demo_punto, demo_parada;
 COMMIT;
 
