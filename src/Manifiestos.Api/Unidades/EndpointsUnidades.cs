@@ -27,6 +27,7 @@ public static class EndpointsUnidades
         g.MapGet("", ListarAsync);
         g.MapPost("", CrearAsync).AddEndpointFilter(EndpointsAcceso.ValidarCsrf);
         g.MapPut("/{id:guid}", EditarAsync).AddEndpointFilter(EndpointsAcceso.ValidarCsrf);
+        g.MapPut("/{id:guid}/operador", AsignarOperadorAsync).AddEndpointFilter(EndpointsAcceso.ValidarCsrf);
     }
 
     private static async Task<IResult> ListarAsync(HttpContext http, IRepositorioUnidades unidades)
@@ -52,6 +53,15 @@ public static class EndpointsUnidades
         // 0 = la unidad no tenía ficha en el listado; la primera ficha se crea con revisión 1.
         if (s.Revision is not >= 0) return Error("Falta la revisión que se editó.");
         return Responder(await unidades.EditarAsync(org, acceso, id, datos!, s.Revision.Value, http.RequestAborted), creada: false, null);
+    }
+
+    private static async Task<IResult> AsignarOperadorAsync(Guid id, SolicitudOperadorUnidad s, HttpContext http, IRepositorioUnidades unidades)
+    {
+        if (!ServiciosAcceso.LeerIds(http.User, out var org, out var acceso)) return Results.Unauthorized();
+        if (s.OperadorId == Guid.Empty) return Error("El operador elegido no está disponible.");
+        // 0 = la unidad no tenía asignación de operador en el listado.
+        if (s.Revision is not >= 0) return Error("Falta la revisión de la asignación que se vio.");
+        return Responder(await unidades.AsignarOperadorAsync(org, acceso, id, s.OperadorId, s.Revision.Value, http.RequestAborted), creada: false, null);
     }
 
     private static IResult? Validar(string? numero, string? placas, string? marca, string? tipo, short? capacidad,

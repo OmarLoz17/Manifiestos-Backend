@@ -202,4 +202,126 @@ public sealed class UnidadesTests : IClassFixture<BaseDatosPrueba>, IAsyncLifeti
         Assert.Equal("1", await _bd.ConsultarAsync($"SELECT count(*) FROM negocio.asignacion_unidad WHERE vehiculo_id = '{creada.Id}'"));
         Assert.Equal("Operador Ficticio Unidades", (await UnidadAsync(nav, creada.Id)).Operador?.Nombre);
     }
+
+    private async Task<Guid> PersonaAsync(string nombre)
+    {
+        var id = Guid.NewGuid();
+        await _bd.SqlComoDuenoAsync($"INSERT INTO seguridad.persona VALUES ('{Org}', '{id}', '{nombre}')");
+        return id;
+    }
+
+    private async Task<Guid> RutaAsync(Guid unidad, string nombre, int mascara)
+    {
+        var ruta = Guid.NewGuid();
+        await _bd.SqlComoDuenoAsync($"""
+            BEGIN;
+            INSERT INTO negocio.ruta(organizacion_id, sucursal_id, id) VALUES ('{Org}', '{Suc}', '{ruta}');
+            INSERT INTO negocio.ruta_version(organizacion_id, sucursal_id, ruta_id, revision, nombre, dias, vehiculo_id)
+            VALUES ('{Org}', '{Suc}', '{ruta}', 1, '{nombre}', {mascara}, '{unidad}');
+            COMMIT;
+            """);
+        return ruta;
+    }
+
+    private static Task<HttpResponseMessage> AsignarAsync(HttpClient nav, Guid unidad, Guid? operador, int revision, bool conCsrf = true) =>
+        EnviarAsync(nav, HttpMethod.Put, $"/api/unidades/{unidad}/operador", new { operadorId = operador, revision }, conCsrf);
+
+    [Fact]
+    public async Task Asignar_operador_crea_revisiones_conserva_el_historial_y_revisa_las_rutas_de_la_unidad()
+    {
+        using var nav = await SesionAsync(true);
+        var unidad = (await CrearAsync(nav, Nueva($"ARM-{Guid.NewGuid():N}"[..12]))).Id;
+        var a = await PersonaAsync("Operador Ficticio A");
+        var b = await PersonaAsync("Operador Ficticio B");
+        var ruta = await RutaAsync(unidad, "Ruta Ficticia Norte", 1);
+
+        Assert.Equal(0, (await UnidadAsync(nav, unidad)).AsignacionRevision);
+        var r1 = await AsignarAsync(nav, unidad, a, 0);
+        Assert.Equal(HttpStatusCode.OK, r1.StatusCode);
+        Assert.Equal(1, (await r1.Content.ReadFromJsonAsync<RevisionGuardada>())!.Revision);
+        var u = await UnidadAsync(nav, unidad);
+        Assert.Equal(("Operador Ficticio A", 1), (u.Operador?.Nombre, u.AsignacionRevision));
+        // Cambiar el operador afecta a la ruta: recibe una revisión nueva con los mismos datos.
+        Assert.Equal("2", await _bd.ConsultarAsync($"SELECT count(*) FROM negocio.ruta_version WHERE ruta_id = '{ruta}'"));
+        Assert.Equal($"Ruta Ficticia Norte|1|{unidad}", await _bd.ConsultarAsync($"SELECT nombre || '|' || dias || '|' || vehiculo_id FROM negocio.ruta_version WHERE ruta_id = '{ruta}' AND revision = 2"));
+
+        // Un cambio visto sobre una asignación vieja recibe 409 y no pisa.
+        await AfirmarErrorAsync(await AsignarAsync(nav, unidad, b, 0), HttpStatusCode.Conflict, RepositorioUnidades.MensajeOperadorModificado);
+        Assert.Equal("Operador Ficticio A", (await UnidadAsync(nav, unidad)).Operador?.Nombre);
+        // El mismo operador no registra nada.
+        Assert.Equal(1, (await (await AsignarAsync(nav, unidad, a, 1)).Content.ReadFromJsonAsync<RevisionGuardada>())!.Revision);
+        Assert.Equal("2", await _bd.ConsultarAsync($"SELECT count(*) FROM negocio.ruta_version WHERE ruta_id = '{ruta}'"));
+
+        Assert.Equal(2, (await (await AsignarAsync(nav, unidad, b, 1)).Content.ReadFromJsonAsync<RevisionGuardada>())!.Revision);
+        // Quitar al operador también es una revisión.
+        var quitar = await AsignarAsync(nav, unidad, null, 2);
+        Assert.Equal(3, (await quitar.Content.ReadFromJsonAsync<RevisionGuardada>())!.Revision);
+        u = await UnidadAsync(nav, unidad);
+        Assert.Null(u.Operador);
+        Assert.Equal(3, u.AsignacionRevision);
+        // El historial conserva a todos y no se sobrescribió nada.
+        Assert.Equal("3", await _bd.ConsultarAsync($"SELECT count(*) FROM negocio.asignacion_unidad WHERE vehiculo_id = '{unidad}'"));
+        Assert.Equal("4", await _bd.ConsultarAsync($"SELECT count(*) FROM negocio.ruta_version WHERE ruta_id = '{ruta}'"));
+        // Seguir sin operador no registra otra revisión.
+        Assert.Equal(3, (await (await AsignarAsync(nav, unidad, null, 3)).Content.ReadFromJsonAsync<RevisionGuardada>())!.Revision);
+    }
+
+    [Fact]
+    public async Task Asignar_operador_valida_permisos_csrf_unidad_y_operador()
+    {
+        using var nav = await SesionAsync(true);
+        var unidad = (await CrearAsync(nav, Nueva($"ARM-{Guid.NewGuid():N}"[..12]))).Id;
+        var a = await PersonaAsync("Operador Ficticio C");
+        Assert.False((await AsignarAsync(nav, unidad, a, 0, conCsrf: false)).IsSuccessStatusCode);
+        await AfirmarErrorAsync(await AsignarAsync(nav, unidad, Guid.NewGuid(), 0), HttpStatusCode.BadRequest, RepositorioUnidades.MensajeOperadorInvalido);
+        await AfirmarErrorAsync(await AsignarAsync(nav, unidad, Guid.Empty, 0), HttpStatusCode.BadRequest, RepositorioUnidades.MensajeOperadorInvalido);
+        await AfirmarErrorAsync(await AsignarAsync(nav, Guid.NewGuid(), a, 0), HttpStatusCode.NotFound, EndpointsUnidades.MensajeNoEncontrada);
+        await AfirmarErrorAsync(await EnviarAsync(nav, HttpMethod.Put, $"/api/unidades/{unidad}/operador", new { operadorId = a }), HttpStatusCode.BadRequest);
+        Assert.Equal("0", await _bd.ConsultarAsync($"SELECT count(*) FROM negocio.asignacion_unidad WHERE vehiculo_id = '{unidad}'"));
+
+        using var lector = await SesionAsync(false);
+        await AfirmarErrorAsync(await AsignarAsync(lector, unidad, a, 0), HttpStatusCode.Forbidden, EndpointsUnidades.MensajeSinPermiso);
+        using var anonimo = _api.NuevoNavegador();
+        Assert.Equal(HttpStatusCode.Unauthorized, (await anonimo.PutAsJsonAsync($"/api/unidades/{unidad}/operador", new { operadorId = a, revision = 0 })).StatusCode);
+        Assert.Equal("0", await _bd.ConsultarAsync($"SELECT count(*) FROM negocio.asignacion_unidad WHERE vehiculo_id = '{unidad}'"));
+    }
+
+    [Fact]
+    public async Task Avisa_sin_bloquear_cuando_las_rutas_de_una_unidad_o_de_un_operador_coinciden_en_dias()
+    {
+        using var nav = await SesionAsync(true);
+        var u1 = (await CrearAsync(nav, Nueva($"ARM-{Guid.NewGuid():N}"[..12]))).Id;
+        var u2 = (await CrearAsync(nav, Nueva($"ARM-{Guid.NewGuid():N}"[..12]))).Id;
+        var persona = await PersonaAsync("Operador Ficticio D");
+        // Lun+Mié y Mié+Vie coinciden en Mié (u1); Mar no coincide con ninguna.
+        await RutaAsync(u1, "Ruta Ficticia A", 1 | 4);
+        await RutaAsync(u1, "Ruta Ficticia B", 4 | 16);
+        await RutaAsync(u2, "Ruta Ficticia C", 4);
+        await RutaAsync(u2, "Ruta Ficticia D", 2);
+        Assert.Equal(HttpStatusCode.OK, (await AsignarAsync(nav, u1, persona, 0)).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await AsignarAsync(nav, u2, persona, 0)).StatusCode);
+
+        Assert.Equal("Ruta Ficticia A y Ruta Ficticia B coinciden en Mié.", Assert.Single((await UnidadAsync(nav, u1)).Avisos));
+        Assert.Empty((await UnidadAsync(nav, u2)).Avisos);
+        // El operador de dos unidades con rutas en Mié recibe avisos entre unidades distintas, y solo esos.
+        var operador = Assert.Single(await nav.GetFromJsonAsync<List<Manifiestos.Api.Operadores.OperadorFicha>>("/api/operadores") ?? [], x => x.Id == persona);
+        Assert.Equal(2, operador.Avisos.Count);
+        Assert.All(operador.Avisos, a => Assert.Contains("coinciden en Mié", a));
+        Assert.DoesNotContain(operador.Avisos, a => a.Contains("Ruta Ficticia A y Ruta Ficticia B"));
+    }
+
+    [Fact]
+    public async Task Dos_asignaciones_simultaneas_sobre_la_misma_revision_dejan_una_sola_y_un_409()
+    {
+        using var nav = await SesionAsync(true);
+        var unidad = (await CrearAsync(nav, Nueva($"ARM-{Guid.NewGuid():N}"[..12]))).Id;
+        var a = await PersonaAsync("Operador Ficticio E");
+        var b = await PersonaAsync("Operador Ficticio F");
+        await RutaAsync(unidad, "Ruta Ficticia Z", 2);
+        var respuestas = await Task.WhenAll(AsignarAsync(nav, unidad, a, 0), AsignarAsync(nav, unidad, b, 0));
+        var estados = respuestas.Select(r => r.StatusCode).OrderBy(x => x).ToArray();
+        Assert.Equal([HttpStatusCode.OK, HttpStatusCode.Conflict], estados);
+        Assert.Equal("1", await _bd.ConsultarAsync($"SELECT count(*) FROM negocio.asignacion_unidad WHERE vehiculo_id = '{unidad}'"));
+        Assert.Equal(1, (await UnidadAsync(nav, unidad)).AsignacionRevision);
+    }
 }

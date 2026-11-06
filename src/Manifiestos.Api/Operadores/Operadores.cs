@@ -11,7 +11,7 @@ public sealed record UnidadDeOperador(Guid Id, string? NumeroEconomico);
 
 /// <summary>Persona conocida en una sucursal. Revisión 0 = todavía sin ficha (solo es operador de una unidad).</summary>
 public sealed record OperadorFicha(
-    Guid Id, Guid SucursalId, int Revision, string Nombre, string? Cargo, string? Correo, IReadOnlyList<UnidadDeOperador> Unidades);
+    Guid Id, Guid SucursalId, int Revision, string Nombre, string? Cargo, string? Correo, IReadOnlyList<UnidadDeOperador> Unidades, IReadOnlyList<string> Avisos);
 
 // ---- Solicitudes ----
 
@@ -65,6 +65,24 @@ public sealed class RepositorioOperadores(NpgsqlDataSource datos) : IRepositorio
                 l.Add(new UnidadDeOperador(r.GetGuid(2), r.IsDBNull(3) ? null : r.GetString(3)));
             }
 
+        // Rutas vigentes de cada unidad con sus días: sirven para avisar si un operador tiene choques de días.
+        var rutasDeUnidad = new Dictionary<Guid, List<(string Ruta, short Dias)>>();
+        await using (var cmd = tx.Comando("""
+            SELECT rv.vehiculo_id, rv.nombre, rv.dias
+            FROM negocio.ruta ru
+            JOIN LATERAL (SELECT x.vehiculo_id, x.nombre, x.dias FROM negocio.ruta_version x
+                WHERE (x.organizacion_id, x.sucursal_id, x.ruta_id) = (ru.organizacion_id, ru.sucursal_id, ru.id)
+                ORDER BY x.revision DESC LIMIT 1) rv ON true
+            WHERE ru.organizacion_id = $1
+            ORDER BY rv.nombre, ru.id
+            """, organizacion))
+        await using (var r = await cmd.ExecuteReaderAsync(ct))
+            while (await r.ReadAsync(ct))
+            {
+                if (!rutasDeUnidad.TryGetValue(r.GetGuid(0), out var l)) rutasDeUnidad[r.GetGuid(0)] = l = [];
+                l.Add((r.GetString(1), r.GetInt16(2)));
+            }
+
         // Una fila por persona y sucursal donde es conocida: con ficha o como operador (histórico) de una unidad.
         var lista = new List<OperadorFicha>();
         await using (var cmd = tx.Comando("""
@@ -85,8 +103,10 @@ public sealed class RepositorioOperadores(NpgsqlDataSource datos) : IRepositorio
             while (await r.ReadAsync(ct))
             {
                 var (persona, sucursal) = (r.GetGuid(0), r.GetGuid(1));
+                var susUnidades = unidades.GetValueOrDefault((sucursal, persona)) ?? [];
+                var susRutas = susUnidades.SelectMany(u => (rutasDeUnidad.GetValueOrDefault(u.Id) ?? []).Select(x => (x.Ruta, x.Dias, (string?)(u.NumeroEconomico ?? "unidad sin número")))).ToList();
                 lista.Add(new OperadorFicha(persona, sucursal, r.GetInt32(2), r.GetString(3), r.IsDBNull(4) ? null : r.GetString(4), r.IsDBNull(5) ? null : r.GetString(5),
-                    unidades.GetValueOrDefault((sucursal, persona)) ?? []));
+                    susUnidades, AvisosDeDias.Coincidencias(susRutas, soloDeUnidadesDistintas: true)));
             }
         await tx.ConfirmarAsync(ct);
         return lista;
