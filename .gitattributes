@@ -1,0 +1,2 @@
+# Conservar LF al clonar: las migraciones SQL aplicadas se validan por SHA-256.
+* text=auto eol=lf
