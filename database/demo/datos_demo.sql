@@ -188,9 +188,14 @@ SELECT DISTINCT 'de000000-0000-4000-8000-000000000001'::uuid, 'de000000-0000-400
     pg_temp.uid('parada-version:' || ruta || ':' || posicion), pg_temp.uid('parada:' || ruta || ':' || posicion), 1,
     pg_temp.uid('sitio:' || sitio) FROM demo_parada;
 -- Misma transacción que la revisión de la parada (trigger agregado_inmutable de 0008).
-INSERT INTO negocio.parada_cliente (organizacion_id, sucursal_id, version_id, cliente_id, banos_planeados)
+-- Órdenes de fosa (vueltas) planeadas: Ruta Oriente atiende fosas fijas (del cliente) y una fosa propia (nuestra, rentada).
+CREATE TEMP TABLE demo_fosa (ruta text, posicion int, cliente text, fosas int);
+INSERT INTO demo_fosa VALUES ('r4', 1, 'g2', 1), ('r4', 2, 'a3', 2), ('r4', 3, 'a4', 1), ('r1', 3, 'a3', 1);
+INSERT INTO negocio.parada_cliente (organizacion_id, sucursal_id, version_id, cliente_id, banos_planeados, fosas_planeadas)
 SELECT 'de000000-0000-4000-8000-000000000001', 'de000000-0000-4000-8000-000000000003',
-    pg_temp.uid('parada-version:' || ruta || ':' || posicion), pg_temp.uid('cliente:' || cliente), banos FROM demo_parada;
+    pg_temp.uid('parada-version:' || p.ruta || ':' || p.posicion), pg_temp.uid('cliente:' || p.cliente), p.banos, f.fosas
+FROM demo_parada p LEFT JOIN demo_fosa f ON (f.ruta, f.posicion, f.cliente) = (p.ruta, p.posicion, p.cliente);
+DROP TABLE demo_fosa;
 
 -- Direcciones conocidas por cliente. Inventario aún sin capturar: no inferirlo del plan.
 INSERT INTO negocio.cliente_sitio (organizacion_id,sucursal_id,cliente_id,sitio_id,revision)
@@ -199,6 +204,9 @@ FROM negocio.parada p JOIN negocio.parada_version v ON (v.organizacion_id,v.sucu
 JOIN negocio.parada_cliente c ON (c.organizacion_id,c.sucursal_id,c.version_id)=(v.organizacion_id,v.sucursal_id,v.id)
 WHERE p.organizacion_id='de000000-0000-4000-8000-000000000001'
 ON CONFLICT DO NOTHING;
+-- La fosa del Taller Mecánico Demo (g2) en Obra Linda Vista es nuestra y está rentada: fosa propia.
+INSERT INTO negocio.cliente_sitio (organizacion_id, sucursal_id, cliente_id, sitio_id, revision, fosas_registradas, fosa_propia)
+VALUES ('de000000-0000-4000-8000-000000000001', 'de000000-0000-4000-8000-000000000003', pg_temp.uid('cliente:g2'), pg_temp.uid('sitio:s07'), 2, 1, true);
 
 -- ---------------- Manifiestos de fosa fija (ficticios) ----------------
 -- Regla confirmada el 6-nov-2026: en fosa fija con convenio cada orden va con la capacidad máxima de la
