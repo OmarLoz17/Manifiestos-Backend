@@ -4,6 +4,7 @@ using Manifiestos.Api.Clientes;
 using Manifiestos.Api.Rutas;
 using Manifiestos.Api.Geografia;
 using Manifiestos.Api.Incidencias;
+using Manifiestos.Api.Jornadas;
 using Manifiestos.Api.Documentos;
 using Manifiestos.Api.Operadores;
 using Manifiestos.Api.Ordenes;
@@ -20,6 +21,7 @@ builder.Services.AgregarUnidades();
 builder.Services.AgregarOperadores();
 builder.Services.AgregarManifiestos();
 builder.Services.AgregarIncidencias();
+builder.Services.AgregarJornadas();
 builder.Services.AgregarOrdenes();
 
 var app = builder.Build();
@@ -37,6 +39,7 @@ app.MapearUnidades();
 app.MapearOperadores();
 app.MapearManifiestos();
 app.MapearIncidencias();
+app.MapearJornadas();
 app.MapearOrdenes();
 
 app.Run();
