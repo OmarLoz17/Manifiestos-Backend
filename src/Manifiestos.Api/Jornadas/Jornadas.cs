@@ -10,7 +10,7 @@ public sealed record SolicitudEstadoJornada(string? Estado, int? Revision);
 
 public interface IRepositorioJornadas
 {
-    Task<IReadOnlyList<JornadaDeRuta>> ListarAsync(Guid organizacion, Guid acceso, DateOnly fecha, CancellationToken ct);
+    Task<IReadOnlyList<JornadaDeRuta>> ListarAsync(Guid organizacion, Guid acceso, DateOnly desde, DateOnly hasta, CancellationToken ct);
     Task<ResultadoEscritura> CambiarEstadoAsync(Guid organizacion, Guid acceso, Guid ruta, DateOnly fecha, string estado, int revision, CancellationToken ct);
 }
 
@@ -37,21 +37,22 @@ public sealed class RepositorioJornadas(NpgsqlDataSource datos) : IRepositorioJo
         _ => false,
     };
 
-    public async Task<IReadOnlyList<JornadaDeRuta>> ListarAsync(Guid organizacion, Guid acceso, DateOnly fecha, CancellationToken ct)
+    public async Task<IReadOnlyList<JornadaDeRuta>> ListarAsync(Guid organizacion, Guid acceso, DateOnly desde, DateOnly hasta, CancellationToken ct)
     {
         await using var tx = await TransaccionContexto.AbrirAsync(datos, organizacion, acceso, ct);
         var lista = new List<JornadaDeRuta>();
         await using (var cmd = tx.Comando("""
-            SELECT j.ruta_id, e.estado, e.revision, e.registrado_en
+            SELECT j.ruta_id, j.fecha, e.estado, e.revision, e.registrado_en
             FROM negocio.jornada j
             JOIN LATERAL (SELECT x.estado, x.revision, x.registrado_en FROM negocio.estado_jornada x
                 WHERE (x.organizacion_id, x.sucursal_id, x.jornada_id) = (j.organizacion_id, j.sucursal_id, j.id)
                 ORDER BY x.revision DESC LIMIT 1) e ON true
-            WHERE j.organizacion_id = $1 AND j.fecha = $2::date
-            """, organizacion, fecha))
+            WHERE j.organizacion_id = $1 AND j.fecha BETWEEN $2::date AND $3::date
+            ORDER BY j.fecha
+            """, organizacion, desde, hasta))
         await using (var r = await cmd.ExecuteReaderAsync(ct))
             while (await r.ReadAsync(ct))
-                lista.Add(new JornadaDeRuta(r.GetGuid(0), fecha, r.GetString(1), r.GetInt32(2), new DateTimeOffset(DateTime.SpecifyKind(r.GetDateTime(3), DateTimeKind.Utc))));
+                lista.Add(new JornadaDeRuta(r.GetGuid(0), DateOnly.FromDateTime(r.GetDateTime(1)), r.GetString(2), r.GetInt32(3), new DateTimeOffset(DateTime.SpecifyKind(r.GetDateTime(4), DateTimeKind.Utc))));
         await tx.ConfirmarAsync(ct);
         return lista;
     }
@@ -136,12 +137,21 @@ public static class EndpointsJornadas
     public static void MapearJornadas(this IEndpointRouteBuilder app)
     {
         var g = app.MapGroup("/api/jornadas");
-        g.MapGet("", async (string? fecha, HttpContext http, IRepositorioJornadas jornadas) =>
+        // ?fecha=AAAA-MM-DD (un día) o ?desde=AAAA-MM-DD&hasta=AAAA-MM-DD (hasta 31 días).
+        g.MapGet("", async (string? fecha, string? desde, string? hasta, HttpContext http, IRepositorioJornadas jornadas) =>
         {
             if (!ServiciosAcceso.LeerIds(http.User, out var org, out var acceso)) return Results.Unauthorized();
-            if (!DateOnly.TryParseExact(fecha, "yyyy-MM-dd", out var f)) return Results.BadRequest(new MensajeError("Indica la fecha como AAAA-MM-DD."));
+            DateOnly d, h;
+            if (fecha is not null)
+            {
+                if (!DateOnly.TryParseExact(fecha, "yyyy-MM-dd", out d)) return Results.BadRequest(new MensajeError("Indica la fecha como AAAA-MM-DD."));
+                h = d;
+            }
+            else if (!DateOnly.TryParseExact(desde, "yyyy-MM-dd", out d) || !DateOnly.TryParseExact(hasta, "yyyy-MM-dd", out h))
+                return Results.BadRequest(new MensajeError("Indica fecha, o desde y hasta como AAAA-MM-DD."));
+            if (h < d || h.DayNumber - d.DayNumber > 31) return Results.BadRequest(new MensajeError("El rango va de 1 a 32 días."));
             http.Response.Headers.CacheControl = "no-store";
-            return Results.Ok(await jornadas.ListarAsync(org, acceso, f, http.RequestAborted));
+            return Results.Ok(await jornadas.ListarAsync(org, acceso, d, h, http.RequestAborted));
         });
         g.MapPut("/{ruta:guid}/{fecha}/estado", async (Guid ruta, string fecha, SolicitudEstadoJornada s, HttpContext http, IRepositorioJornadas jornadas) =>
         {

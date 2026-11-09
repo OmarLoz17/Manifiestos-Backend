@@ -81,6 +81,10 @@ public sealed class JornadasTests : IClassFixture<BaseDatosPrueba>, IAsyncLifeti
         var publicada = Assert.Single(await ListarAsync(nav, Lunes), j => j.RutaId == ruta);
         Assert.Equal(("programada", 2), (publicada.Estado, publicada.Revision));
         Assert.DoesNotContain(await ListarAsync(nav, "2026-11-11"), j => j.RutaId == ruta); // otra fecha: sin publicar
+        var semana = (await nav.GetFromJsonAsync<List<JornadaDeRuta>>("/api/jornadas?desde=2026-11-09&hasta=2026-11-14"))!;
+        Assert.Equal(DateOnly.Parse(Lunes), Assert.Single(semana, j => j.RutaId == ruta).Fecha); // el rango trae su fecha
+        Assert.Equal(HttpStatusCode.BadRequest, (await nav.GetAsync("/api/jornadas?desde=2026-11-09&hasta=2026-12-30")).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await nav.GetAsync("/api/jornadas?desde=2026-11-09")).StatusCode);
 
         // Datos viejos: 409. Mismo estado: sin cambios.
         Assert.Equal(HttpStatusCode.Conflict, (await CambiarAsync(nav, ruta, Lunes, "cancelada", 0)).StatusCode);
