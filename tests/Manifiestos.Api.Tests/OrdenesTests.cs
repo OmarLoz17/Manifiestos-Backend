@@ -103,4 +103,53 @@ public sealed class OrdenesTests : IClassFixture<BaseDatosPrueba>, IAsyncLifetim
         using var anonimo = _api.NuevoNavegador();
         Assert.Equal(HttpStatusCode.Unauthorized, (await anonimo.GetAsync("/api/ordenes")).StatusCode);
     }
+
+    [Fact]
+    public async Task Parada_extraordinaria_es_de_un_dia_no_forma_parte_de_la_ruta_fija_y_valida_dia_sitio_y_permisos()
+    {
+        var (ruta, unidad, parada, sitio, version, empresa, cliente, otro, empresaOtro) = (Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid());
+        await _bd.SqlComoDuenoAsync($"""
+            BEGIN;
+            INSERT INTO negocio.empresa VALUES ('{Org}', '{empresa}', 'CLI-{empresa:N}'), ('{Org}', '{empresaOtro}', 'CLI-{empresaOtro:N}');
+            INSERT INTO negocio.ficha_empresa(organizacion_id, empresa_id, revision, nombre_comercial) VALUES
+                ('{Org}', '{empresa}', 1, 'Cliente Extra Ficticio'), ('{Org}', '{empresaOtro}', 1, 'Otro Cliente Ficticio');
+            INSERT INTO negocio.empresa_sucursal VALUES ('{Org}', '{Suc}', '{empresa}'), ('{Org}', '{Suc}', '{empresaOtro}');
+            INSERT INTO negocio.cliente VALUES ('{Org}', '{Suc}', '{cliente}', '{empresa}', 'X-{cliente:N}'), ('{Org}', '{Suc}', '{otro}', '{empresaOtro}', 'Y-{otro:N}');
+            INSERT INTO negocio.vehiculo VALUES ('{Org}', '{Suc}', '{unidad}', 'EXT-{unidad.ToString("N")[..5]}');
+            INSERT INTO negocio.ficha_vehiculo(organizacion_id, sucursal_id, vehiculo_id, revision, capacidad_id, clasificacion) VALUES ('{Org}', '{Suc}', '{unidad}', 1, 2, 'fosas');
+            INSERT INTO negocio.sitio VALUES ('{Org}', '{Suc}', '{sitio}', 'Sitio extra');
+            INSERT INTO negocio.ficha_sitio(organizacion_id, sucursal_id, sitio_id, revision, nombre, calle, municipio) VALUES ('{Org}', '{Suc}', '{sitio}', 1, 'Planta Extra Ficticia', 'Calle Ficticia 5', 'Municipio Ficticio');
+            INSERT INTO negocio.punto_servicio VALUES ('{Org}', '{Suc}', '{sitio}');
+            INSERT INTO negocio.cliente_sitio(organizacion_id, sucursal_id, cliente_id, sitio_id, revision) VALUES ('{Org}', '{Suc}', '{cliente}', '{sitio}', 1);
+            INSERT INTO negocio.ruta(organizacion_id, sucursal_id, id) VALUES ('{Org}', '{Suc}', '{ruta}');
+            INSERT INTO negocio.ruta_version(organizacion_id, sucursal_id, ruta_id, revision, nombre, dias, vehiculo_id) VALUES ('{Org}', '{Suc}', '{ruta}', 1, 'Ruta Extra Ficticia', 21, '{unidad}');
+            INSERT INTO negocio.parada(organizacion_id, sucursal_id, id, ruta_id, posicion) VALUES ('{Org}', '{Suc}', '{parada}', '{ruta}', 1);
+            INSERT INTO negocio.parada_version(organizacion_id, sucursal_id, id, parada_id, revision, sitio_id) VALUES ('{Org}', '{Suc}', '{version}', '{parada}', 1, '{sitio}');
+            INSERT INTO negocio.parada_cliente(organizacion_id, sucursal_id, version_id, cliente_id, banos_planeados, fosas_planeadas) VALUES ('{Org}', '{Suc}', '{version}', '{cliente}', NULL, 1);
+            COMMIT;
+            """);
+        using var nav = await SesionAsync();
+        const string lunes = "2026-11-09", martes = "2026-11-10", miercoles = "2026-11-11";
+        var cuerpo = new { rutaId = ruta, fecha = lunes, sitioId = sitio, clientes = new[] { new { clienteId = cliente, banos = 0, fosas = 2 } } };
+        Assert.Equal(HttpStatusCode.Created, (await EnviarAsync(nav, HttpMethod.Post, "/api/ordenes/extraordinarias", cuerpo)).StatusCode);
+
+        // Solo existe ese lunes: el miércoles (que también sale) y el plan fijo no la traen.
+        var lun = Assert.Single((await nav.GetFromJsonAsync<List<RutaDeOrdenes>>($"/api/ordenes?fecha={lunes}"))!, x => x.Id == ruta);
+        var extra = Assert.Single(lun.Extraordinarias!);
+        Assert.Equal(("Planta Extra Ficticia", 2), (extra.Sitio, Assert.Single(extra.Clientes).Fosas));
+        Assert.Empty(Assert.Single((await nav.GetFromJsonAsync<List<RutaDeOrdenes>>($"/api/ordenes?fecha={miercoles}"))!, x => x.Id == ruta).Extraordinarias!);
+        var fija = Assert.Single((await nav.GetFromJsonAsync<List<RutaDeOrdenes>>("/api/ordenes"))!, x => x.Id == ruta);
+        Assert.Single(fija.Paradas); // la ruta fija no cambió
+        Assert.Empty(fija.Extraordinarias ?? []);
+
+        // Validaciones: día en que no sale, cliente sin ese sitio, cantidades y permisos.
+        Assert.Equal(HttpStatusCode.BadRequest, (await EnviarAsync(nav, HttpMethod.Post, "/api/ordenes/extraordinarias", new { rutaId = ruta, fecha = martes, sitioId = sitio, clientes = new[] { new { clienteId = cliente, fosas = 1 } } })).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await EnviarAsync(nav, HttpMethod.Post, "/api/ordenes/extraordinarias", new { rutaId = ruta, fecha = lunes, sitioId = sitio, clientes = new[] { new { clienteId = otro, fosas = 1 } } })).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await EnviarAsync(nav, HttpMethod.Post, "/api/ordenes/extraordinarias", new { rutaId = ruta, fecha = lunes, sitioId = sitio, clientes = new[] { new { clienteId = cliente, banos = 0, fosas = 0 } } })).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await EnviarAsync(nav, HttpMethod.Post, "/api/ordenes/extraordinarias", new { rutaId = Guid.NewGuid(), fecha = lunes, sitioId = sitio, clientes = new[] { new { clienteId = cliente, fosas = 1 } } })).StatusCode);
+        using var lector = await SesionAsync(escribir: false);
+        Assert.Equal(HttpStatusCode.Forbidden, (await EnviarAsync(lector, HttpMethod.Post, "/api/ordenes/extraordinarias", cuerpo)).StatusCode);
+        using var anonimo = _api.NuevoNavegador();
+        Assert.Equal(HttpStatusCode.Unauthorized, (await anonimo.PostAsJsonAsync("/api/ordenes/extraordinarias", cuerpo)).StatusCode);
+    }
 }
