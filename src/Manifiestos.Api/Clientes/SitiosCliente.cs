@@ -19,7 +19,7 @@ public static class SitiosCliente
                        ORDER BY pv.revision DESC LIMIT 1) v ON v.sitio_id=cs.sitio_id
                      JOIN negocio.parada_cliente pc ON (pc.organizacion_id,pc.sucursal_id,pc.version_id)=(p.organizacion_id,p.sucursal_id,v.id)
                      WHERE p.organizacion_id=cs.organizacion_id AND p.sucursal_id=cs.sucursal_id AND pc.cliente_id=cs.cliente_id),
-                   cs.fosa_propia
+                   cs.fosa_propia, f.latitud, f.longitud
             FROM (SELECT DISTINCT ON (organizacion_id,sucursal_id,cliente_id,sitio_id) *
                   FROM negocio.cliente_sitio WHERE organizacion_id=$1
                     AND ($2::uuid='00000000-0000-0000-0000-000000000000'::uuid OR cliente_id=$2)
@@ -37,7 +37,8 @@ public static class SitiosCliente
             var clave = (r.GetGuid(0),r.GetGuid(1));
             if (!lista.TryGetValue(clave,out var sitios)) lista[clave]=sitios=[];
             sitios.Add(new SitioCliente(r.GetGuid(2),r.GetInt32(3),r.GetInt32(4),T(5),T(6),T(7),T(8),T(9),T(10),T(11),
-                r.IsDBNull(12)?null:r.GetInt32(12),r.IsDBNull(13)?null:r.GetInt32(13),r.GetBoolean(14),r.GetBoolean(15)));
+                r.IsDBNull(12)?null:r.GetInt32(12),r.IsDBNull(13)?null:r.GetInt32(13),r.GetBoolean(14),r.GetBoolean(15),
+                r.IsDBNull(16)?null:r.GetDecimal(16),r.IsDBNull(17)?null:r.GetDecimal(17)));
         }
         return lista;
     }
@@ -79,18 +80,18 @@ public static class SitiosCliente
                 await punto.ExecuteNonQueryAsync(ct);
             }
             var cambioDireccion=actual is null ||
-                (actual.Nombre,actual.Calle,actual.NumeroExterior,actual.Colonia,actual.CodigoPostal,actual.Municipio,actual.Estado)!=
-                (s.Nombre,s.Calle,s.NumeroExterior,s.Colonia,s.CodigoPostal,s.Municipio,s.Estado);
+                (actual.Nombre,actual.Calle,actual.NumeroExterior,actual.Colonia,actual.CodigoPostal,actual.Municipio,actual.Estado,actual.Latitud,actual.Longitud)!=
+                (s.Nombre,s.Calle,s.NumeroExterior,s.Colonia,s.CodigoPostal,s.Municipio,s.Estado,s.Latitud,s.Longitud);
             if (cambioDireccion)
             {
                 await using var ficha=tx.Comando("""
-                    INSERT INTO negocio.ficha_sitio (organizacion_id,sucursal_id,sitio_id,revision,nombre,calle,numero_exterior,colonia,codigo_postal,municipio,estado,pais,numero_interior,referencia_localizacion)
-                    SELECT $1,$2,$3,$4,$5::text,$6::text,$7::text,$8::text,$9::text,$10::text,$11::text,previa.pais,previa.numero_interior,previa.referencia_localizacion
+                    INSERT INTO negocio.ficha_sitio (organizacion_id,sucursal_id,sitio_id,revision,nombre,calle,numero_exterior,colonia,codigo_postal,municipio,estado,latitud,longitud,pais,numero_interior,referencia_localizacion)
+                    SELECT $1,$2,$3,$4,$5::text,$6::text,$7::text,$8::text,$9::text,$10::text,$11::text,$12::numeric,$13::numeric,previa.pais,previa.numero_interior,previa.referencia_localizacion
                     FROM (SELECT 1) base LEFT JOIN LATERAL (
                         SELECT pais,numero_interior,referencia_localizacion FROM negocio.ficha_sitio
                         WHERE organizacion_id=$1 AND sucursal_id=$2 AND sitio_id=$3 ORDER BY revision DESC LIMIT 1
                     ) previa ON true
-                    """,org,suc,id,(actual?.RevisionFicha??0)+1,N(s.Nombre),N(s.Calle),N(s.NumeroExterior),N(s.Colonia),N(s.CodigoPostal),N(s.Municipio),N(s.Estado));
+                    """,org,suc,id,(actual?.RevisionFicha??0)+1,N(s.Nombre),N(s.Calle),N(s.NumeroExterior),N(s.Colonia),N(s.CodigoPostal),N(s.Municipio),N(s.Estado),N(s.Latitud),N(s.Longitud));
                 await ficha.ExecuteNonQueryAsync(ct);
             }
             if (actual is null || actual.Banos!=s.Banos || actual.Fosas!=s.Fosas || actual.FosaPropia!=s.FosaPropia)

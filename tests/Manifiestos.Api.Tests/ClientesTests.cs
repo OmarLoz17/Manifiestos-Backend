@@ -115,6 +115,27 @@ public sealed class ClientesTests : IClassFixture<BaseDatosPrueba>, IAsyncLifeti
     }
 
     [Fact]
+    public async Task Sitio_guarda_coordenadas_aproximadas_como_revision_y_valida_el_par()
+    {
+        using var nav = await SesionAsync(true);
+        var creado = await CrearAsync(nav, new { sucursalId = Suc, nombreFiscal = "Cliente con mapa ficticio" });
+        var url = $"/api/clientes/{creado.Id}/sitios";
+        Assert.Equal(HttpStatusCode.BadRequest, (await EnviarAsync(nav, HttpMethod.Put, url, new { sitios = new[] { new { nombre = "Solo latitud", latitud = 25.68m } } })).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await EnviarAsync(nav, HttpMethod.Put, url, new { sitios = new[] { new { nombre = "Fuera de rango", latitud = 95m, longitud = -100m } } })).StatusCode);
+        Assert.Equal(HttpStatusCode.NoContent, (await EnviarAsync(nav, HttpMethod.Put, url, new { sitios = new[] { new { nombre = "Obra con punto", latitud = 25.6866123m, longitud = -100.3161126m } } })).StatusCode);
+        var sitio = Assert.Single((await ClienteAsync(nav, creado.Id)).Sitios!);
+        Assert.Equal(25.686612m, sitio.Latitud);
+        Assert.Equal(-100.316113m, sitio.Longitud);
+        Assert.Equal(1, sitio.RevisionFicha);
+        // Quitar el punto es una revisión nueva de la ficha.
+        var quitar = new { sitios = new[] { new { sitioId = sitio.SitioId, revision = sitio.Revision, revisionFicha = sitio.RevisionFicha, nombre = "Obra con punto" } } };
+        Assert.Equal(HttpStatusCode.NoContent, (await EnviarAsync(nav, HttpMethod.Put, url, quitar)).StatusCode);
+        var sin = Assert.Single((await ClienteAsync(nav, creado.Id)).Sitios!);
+        Assert.Null(sin.Latitud);
+        Assert.Equal(2, sin.RevisionFicha);
+    }
+
+    [Fact]
     public async Task Sin_sesion_no_lista_ni_crea()
     {
         var nav = _api.NuevoNavegador();

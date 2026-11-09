@@ -16,7 +16,7 @@ public sealed record IncidenciaResumen(
     Guid Id, Guid SucursalId, string Folio, string Servicio, string Motivo, string? Descripcion, DateTimeOffset OcurridaEn,
     Referencia? Ruta, ParadaDeIncidencia? Parada, Referencia? Cliente, Referencia? Unidad, Referencia? Operador,
     int? BanosAsignados, int? BanosAtendidos, bool TieneEvidencia, UbicacionIncidencia? Ubicacion,
-    string Estatus, int Revision, IReadOnlyList<SeguimientoIncidencia> Historial);
+    string Estatus, int Revision, IReadOnlyList<SeguimientoIncidencia> Historial, bool FosaPropia);
 
 public sealed record SolicitudSeguimiento(string? Estatus, string? Comentario, int? Revision);
 
@@ -59,7 +59,8 @@ public sealed class RepositorioIncidencias(NpgsqlDataSource datos) : IRepositori
                    i.cliente_id, coalesce(nullif(btrim(fe.nombre_comercial), ''), nullif(btrim(fe.nombre_fiscal), ''), nullif(btrim(c.codigo_comercial), ''), 'Cliente sin nombre'),
                    i.vehiculo_id, coalesce(fv.numero_economico, veh.numero_economico),
                    i.persona_id, coalesce(op.nombre_completo, pe.nombre_completo),
-                   i.banos_asignados, i.banos_atendidos, i.evidencia_archivo_id IS NOT NULL, i.latitud, i.longitud, i.precision_m
+                   i.banos_asignados, i.banos_atendidos, i.evidencia_archivo_id IS NOT NULL, i.latitud, i.longitud, i.precision_m,
+                   coalesce(cs.fosa_propia, false)
             FROM negocio.incidencia i
             LEFT JOIN LATERAL (SELECT x.nombre FROM negocio.ruta_version x
                 WHERE (x.organizacion_id, x.sucursal_id, x.ruta_id) = (i.organizacion_id, i.sucursal_id, i.ruta_id)
@@ -72,6 +73,9 @@ public sealed class RepositorioIncidencias(NpgsqlDataSource datos) : IRepositori
             LEFT JOIN LATERAL (SELECT x.nombre FROM negocio.ficha_sitio x
                 WHERE (x.organizacion_id, x.sucursal_id, x.sitio_id) = (si.organizacion_id, si.sucursal_id, si.id)
                 ORDER BY x.revision DESC LIMIT 1) fs ON true
+            LEFT JOIN LATERAL (SELECT x.fosa_propia FROM negocio.cliente_sitio x
+                WHERE (x.organizacion_id, x.sucursal_id, x.cliente_id, x.sitio_id) = (i.organizacion_id, i.sucursal_id, i.cliente_id, pv.sitio_id)
+                ORDER BY x.revision DESC LIMIT 1) cs ON true
             LEFT JOIN negocio.cliente c ON (c.organizacion_id, c.sucursal_id, c.id) = (i.organizacion_id, i.sucursal_id, i.cliente_id)
             LEFT JOIN LATERAL (SELECT x.nombre_fiscal, x.nombre_comercial FROM negocio.ficha_empresa x
                 WHERE (x.organizacion_id, x.empresa_id) = (c.organizacion_id, c.empresa_id)
@@ -102,7 +106,7 @@ public sealed class RepositorioIncidencias(NpgsqlDataSource datos) : IRepositori
                     Ref(12, 13, "Cliente sin nombre"), Ref(14, 15, "Unidad sin número"), Ref(16, 17, "Operador sin nombre"),
                     r.IsDBNull(18) ? null : r.GetInt32(18), r.IsDBNull(19) ? null : r.GetInt32(19), r.GetBoolean(20),
                     r.IsDBNull(21) ? null : new UbicacionIncidencia(r.GetDecimal(21), r.GetDecimal(22), r.IsDBNull(23) ? null : r.GetDecimal(23)),
-                    ultimo?.Estatus ?? "abierta", ultimo?.Revision ?? 0, h));
+                    ultimo?.Estatus ?? "abierta", ultimo?.Revision ?? 0, h, r.GetBoolean(24)));
             }
         await tx.ConfirmarAsync(ct);
         return lista;

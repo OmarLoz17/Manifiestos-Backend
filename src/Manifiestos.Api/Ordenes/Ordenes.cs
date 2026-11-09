@@ -15,7 +15,8 @@ public sealed record UnidadDeOrden(Guid Id, string? NumeroEconomico, decimal? Ca
 /// Fosas = órdenes (vueltas) planeadas en la parada. FosaPropia = la fosa del sitio es nuestra, rentada.
 /// </summary>
 public sealed record ClienteDeOrden(Guid ClienteId, string Nombre, bool Autorizado, int Banos, int Fosas, bool FosaPropia);
-public sealed record ParadaDeOrden(Guid Id, int Posicion, string? Sitio, string? Direccion, IReadOnlyList<ClienteDeOrden> Clientes);
+public sealed record ParadaDeOrden(Guid Id, int Posicion, string? Sitio, string? Direccion, IReadOnlyList<ClienteDeOrden> Clientes,
+    decimal? Latitud = null, decimal? Longitud = null);
 public sealed record RutaDeOrdenes(
     Guid Id, Guid SucursalId, string Nombre, IReadOnlyList<int> Dias, UnidadDeOrden Unidad, OperadorResumen? Operador,
     IReadOnlyList<ParadaDeOrden> Paradas);
@@ -65,7 +66,8 @@ public sealed class RepositorioOrdenes(NpgsqlDataSource datos) : IRepositorioOrd
         var paradas = new Dictionary<Guid, List<ParadaDeOrden>>();
         await using (var cmd = tx.Comando("""
             SELECT pa.ruta_id, pa.id, pa.posicion, coalesce(nullif(btrim(fs.nombre), ''), s.referencia),
-                   nullif(concat_ws(', ', nullif(btrim(concat_ws(' ', fs.calle, fs.numero_exterior)), ''), fs.colonia, fs.municipio), '')
+                   nullif(concat_ws(', ', nullif(btrim(concat_ws(' ', fs.calle, fs.numero_exterior)), ''), fs.colonia, fs.municipio), ''),
+                   fs.latitud, fs.longitud
             FROM negocio.parada pa
             JOIN LATERAL (SELECT x.sitio_id FROM negocio.parada_version x
                 WHERE (x.organizacion_id, x.sucursal_id, x.parada_id) = (pa.organizacion_id, pa.sucursal_id, pa.id)
@@ -81,7 +83,8 @@ public sealed class RepositorioOrdenes(NpgsqlDataSource datos) : IRepositorioOrd
             while (await r.ReadAsync(ct))
             {
                 if (!paradas.TryGetValue(r.GetGuid(0), out var l)) paradas[r.GetGuid(0)] = l = [];
-                l.Add(new ParadaDeOrden(r.GetGuid(1), r.GetInt32(2), T(r, 3), T(r, 4), clientes.GetValueOrDefault(r.GetGuid(1)) ?? []));
+                l.Add(new ParadaDeOrden(r.GetGuid(1), r.GetInt32(2), T(r, 3), T(r, 4), clientes.GetValueOrDefault(r.GetGuid(1)) ?? [],
+                    r.IsDBNull(5) ? null : r.GetDecimal(5), r.IsDBNull(6) ? null : r.GetDecimal(6)));
             }
 
         var rutas = new List<RutaDeOrdenes>();

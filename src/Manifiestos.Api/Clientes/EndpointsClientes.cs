@@ -84,8 +84,10 @@ public static class EndpointsClientes
             var campos=new[]{s.Nombre,s.Calle,s.NumeroExterior,s.Colonia,s.CodigoPostal,s.Municipio,s.Estado};
             if (campos.Any(c=>c?.Trim().Length>LargoMaximoCampo)) return "Cada dato de dirección admite hasta 200 caracteres.";
             if (campos.All(string.IsNullOrWhiteSpace)) return "Escribe el nombre o la dirección del sitio de servicio.";
+            if (s.Latitud.HasValue != s.Longitud.HasValue) return "Escribe latitud y longitud juntas, o deja ambas vacías.";
+            if (s.Latitud is < -90 or > 90 || s.Longitud is < -180 or > 180) return "La latitud va de -90 a 90 y la longitud de -180 a 180.";
             string? T(string? t)=>string.IsNullOrWhiteSpace(t)?null:t.Trim();
-            lista.Add(s with { Nombre=T(s.Nombre),Calle=T(s.Calle),NumeroExterior=T(s.NumeroExterior),Colonia=T(s.Colonia),CodigoPostal=T(s.CodigoPostal),Municipio=T(s.Municipio),Estado=T(s.Estado) });
+            lista.Add(s with { Latitud=s.Latitud is {} la?Math.Round(la,6):null,Longitud=s.Longitud is {} lo?Math.Round(lo,6):null,Nombre=T(s.Nombre),Calle=T(s.Calle),NumeroExterior=T(s.NumeroExterior),Colonia=T(s.Colonia),CodigoPostal=T(s.CodigoPostal),Municipio=T(s.Municipio),Estado=T(s.Estado) });
         }
         sitios=lista.ToArray();
         return null;
