@@ -12,7 +12,8 @@ public sealed record UnidadDeOrden(Guid Id, string? NumeroEconomico, decimal? Ca
 /// <summary>
 /// Cliente atendido en una parada. Autorizado = tiene autorización de medio ambiente como generador:
 /// él es el generador y firma; si no, el generador es nuestra empresa y no firma (requisitos 1.4).
-/// Fosas = órdenes (vueltas) planeadas en la parada. FosaPropia = la fosa del sitio es nuestra, rentada.
+/// Fosas = órdenes (vueltas) planeadas en la parada. FosaPropia = la fosa es nuestra, rentada: se deduce del cliente (decisión del
+/// 9-nov-2026): un cliente autorizado tiene fosa propia SUYA (fija); uno general nos la renta (fosa nuestra). No se pregunta.
 /// </summary>
 public sealed record ClienteDeOrden(Guid ClienteId, string Nombre, bool Autorizado, int Banos, int Fosas, bool FosaPropia);
 public sealed record ParadaDeOrden(Guid Id, int Posicion, string? Sitio, string? Direccion, IReadOnlyList<ClienteDeOrden> Clientes,
@@ -49,7 +50,7 @@ public sealed class RepositorioOrdenes(NpgsqlDataSource datos) : IRepositorioOrd
                    coalesce(nullif(btrim(fe.nombre_comercial), ''), nullif(btrim(fe.nombre_fiscal), ''), nullif(btrim(c.codigo_comercial), ''), 'Cliente sin nombre'),
                    EXISTS (SELECT 1 FROM negocio.autorizacion_empresa a WHERE (a.organizacion_id, a.empresa_id) = (c.organizacion_id, c.empresa_id)
                            AND a.autoridad = 'Medio ambiente' AND a.finalidad = 'Generador'),
-                   coalesce(pc.banos_planeados, 0), coalesce(pc.fosas_planeadas, 0), coalesce(cs.fosa_propia, false)
+                   coalesce(pc.banos_planeados, 0), coalesce(pc.fosas_planeadas, 0), NOT EXISTS (SELECT 1 FROM negocio.autorizacion_empresa a WHERE (a.organizacion_id, a.empresa_id) = (c.organizacion_id, c.empresa_id) AND a.autoridad = 'Medio ambiente' AND a.finalidad = 'Generador')
             FROM negocio.parada pa
             JOIN LATERAL (SELECT x.id, x.sitio_id FROM negocio.parada_version x
                 WHERE (x.organizacion_id, x.sucursal_id, x.parada_id) = (pa.organizacion_id, pa.sucursal_id, pa.id)
@@ -108,7 +109,7 @@ public sealed class RepositorioOrdenes(NpgsqlDataSource datos) : IRepositorioOrd
                        coalesce(nullif(btrim(fe.nombre_comercial), ''), nullif(btrim(fe.nombre_fiscal), ''), nullif(btrim(c.codigo_comercial), ''), 'Cliente sin nombre'),
                        EXISTS (SELECT 1 FROM negocio.autorizacion_empresa a WHERE (a.organizacion_id, a.empresa_id) = (c.organizacion_id, c.empresa_id)
                                AND a.autoridad = 'Medio ambiente' AND a.finalidad = 'Generador'),
-                       coalesce(pc.banos_planeados, 0), coalesce(pc.fosas_planeadas, 0), coalesce(cs.fosa_propia, false)
+                       coalesce(pc.banos_planeados, 0), coalesce(pc.fosas_planeadas, 0), NOT EXISTS (SELECT 1 FROM negocio.autorizacion_empresa a WHERE (a.organizacion_id, a.empresa_id) = (c.organizacion_id, c.empresa_id) AND a.autoridad = 'Medio ambiente' AND a.finalidad = 'Generador')
                 FROM negocio.parada_extraordinaria pe
                 JOIN negocio.sitio s ON (s.organizacion_id, s.sucursal_id, s.id) = (pe.organizacion_id, pe.sucursal_id, pe.sitio_id)
                 LEFT JOIN LATERAL (SELECT x.* FROM negocio.ficha_sitio x

@@ -60,7 +60,7 @@ public sealed class RepositorioIncidencias(NpgsqlDataSource datos) : IRepositori
                    i.vehiculo_id, coalesce(fv.numero_economico, veh.numero_economico),
                    i.persona_id, coalesce(op.nombre_completo, pe.nombre_completo),
                    i.banos_asignados, i.banos_atendidos, i.evidencia_archivo_id IS NOT NULL, i.latitud, i.longitud, i.precision_m,
-                   coalesce(cs.fosa_propia, false)
+                   NOT EXISTS (SELECT 1 FROM negocio.autorizacion_empresa a WHERE (a.organizacion_id, a.empresa_id) = (c.organizacion_id, c.empresa_id) AND a.autoridad = 'Medio ambiente' AND a.finalidad = 'Generador')
             FROM negocio.incidencia i
             LEFT JOIN LATERAL (SELECT x.nombre FROM negocio.ruta_version x
                 WHERE (x.organizacion_id, x.sucursal_id, x.ruta_id) = (i.organizacion_id, i.sucursal_id, i.ruta_id)
