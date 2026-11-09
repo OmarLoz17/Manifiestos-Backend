@@ -71,16 +71,21 @@ public sealed class JornadasTests : IClassFixture<BaseDatosPrueba>, IAsyncLifeti
         (await nav.GetFromJsonAsync<List<JornadaDeRuta>>($"/api/jornadas?fecha={fecha}"))!;
 
     [Fact]
-    public async Task Publicar_retirar_y_cancelar_una_jornada_guarda_el_historial_con_revision()
+    public async Task Sin_fila_la_ruta_ya_esta_programada_y_borrador_confirmar_y_cancelar_guardan_su_historial()
     {
         var ruta = await SembrarRutaAsync(completa: true);
         using var nav = await SesionAsync();
-        Assert.DoesNotContain(await ListarAsync(nav, Lunes), j => j.RutaId == ruta); // sin fila = borrador
+        Assert.DoesNotContain(await ListarAsync(nav, Lunes), j => j.RutaId == ruta); // sin fila = programada
 
+        // Programada ya es el estado por omisión: pedirla no cambia nada.
         Assert.Equal(HttpStatusCode.OK, (await CambiarAsync(nav, ruta, Lunes, "programada", 0)).StatusCode);
-        var publicada = Assert.Single(await ListarAsync(nav, Lunes), j => j.RutaId == ruta);
-        Assert.Equal(("programada", 2), (publicada.Estado, publicada.Revision));
-        Assert.DoesNotContain(await ListarAsync(nav, "2026-11-11"), j => j.RutaId == ruta); // otra fecha: sin publicar
+        Assert.DoesNotContain(await ListarAsync(nav, Lunes), j => j.RutaId == ruta);
+
+        // Guardar como borrador (cambios sin confirmar): revisión 1 = programada por omisión, revisión 2 = borrador.
+        Assert.Equal(HttpStatusCode.OK, (await CambiarAsync(nav, ruta, Lunes, "borrador", 0)).StatusCode);
+        var borrador = Assert.Single(await ListarAsync(nav, Lunes), j => j.RutaId == ruta);
+        Assert.Equal(("borrador", 2), (borrador.Estado, borrador.Revision));
+        Assert.DoesNotContain(await ListarAsync(nav, "2026-11-11"), j => j.RutaId == ruta); // otra fecha: intacta
         var semana = (await nav.GetFromJsonAsync<List<JornadaDeRuta>>("/api/jornadas?desde=2026-11-09&hasta=2026-11-14"))!;
         Assert.Equal(DateOnly.Parse(Lunes), Assert.Single(semana, j => j.RutaId == ruta).Fecha); // el rango trae su fecha
         Assert.Equal(HttpStatusCode.BadRequest, (await nav.GetAsync("/api/jornadas?desde=2026-11-09&hasta=2026-12-30")).StatusCode);
@@ -88,14 +93,15 @@ public sealed class JornadasTests : IClassFixture<BaseDatosPrueba>, IAsyncLifeti
 
         // Datos viejos: 409. Mismo estado: sin cambios.
         Assert.Equal(HttpStatusCode.Conflict, (await CambiarAsync(nav, ruta, Lunes, "cancelada", 0)).StatusCode);
-        Assert.Equal(HttpStatusCode.OK, (await CambiarAsync(nav, ruta, Lunes, "programada", 2)).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await CambiarAsync(nav, ruta, Lunes, "borrador", 2)).StatusCode);
         Assert.Equal(2, Assert.Single(await ListarAsync(nav, Lunes), j => j.RutaId == ruta).Revision);
 
-        Assert.Equal(HttpStatusCode.OK, (await CambiarAsync(nav, ruta, Lunes, "borrador", 2)).StatusCode); // retirar
+        Assert.Equal(HttpStatusCode.OK, (await CambiarAsync(nav, ruta, Lunes, "programada", 2)).StatusCode); // confirmar
         Assert.Equal(HttpStatusCode.OK, (await CambiarAsync(nav, ruta, Lunes, "cancelada", 3)).StatusCode);
-        var cancelada = Assert.Single(await ListarAsync(nav, Lunes), j => j.RutaId == ruta);
-        Assert.Equal(("cancelada", 4), (cancelada.Estado, cancelada.Revision));
-        Assert.Equal("borrador,programada,borrador,cancelada",
+        Assert.Equal(HttpStatusCode.OK, (await CambiarAsync(nav, ruta, Lunes, "programada", 4)).StatusCode); // reabrir
+        var final = Assert.Single(await ListarAsync(nav, Lunes), j => j.RutaId == ruta);
+        Assert.Equal(("programada", 5), (final.Estado, final.Revision));
+        Assert.Equal("programada,borrador,programada,cancelada,programada",
             await _bd.ConsultarAsync($"SELECT string_agg(e.estado, ',' ORDER BY e.revision) FROM negocio.estado_jornada e JOIN negocio.jornada j ON j.id = e.jornada_id WHERE j.ruta_id = '{ruta}' AND j.fecha = '{Lunes}'"));
     }
 
@@ -106,11 +112,12 @@ public sealed class JornadasTests : IClassFixture<BaseDatosPrueba>, IAsyncLifeti
         var incompleta = await SembrarRutaAsync(completa: false);
         using var nav = await SesionAsync();
         Assert.Equal(HttpStatusCode.BadRequest, (await CambiarAsync(nav, completa, Martes, "programada", 0)).StatusCode); // no sale martes
-        Assert.Equal(HttpStatusCode.BadRequest, (await CambiarAsync(nav, incompleta, Lunes, "programada", 0)).StatusCode); // sin operador ni paradas
+        Assert.Equal(HttpStatusCode.OK, (await CambiarAsync(nav, incompleta, Lunes, "borrador", 0)).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await CambiarAsync(nav, incompleta, Lunes, "programada", 2)).StatusCode); // confirmar exige operador y paradas
         Assert.Equal(HttpStatusCode.BadRequest, (await CambiarAsync(nav, completa, Lunes, "en_curso", 0)).StatusCode); // eso lo pone la app
         Assert.Equal(HttpStatusCode.BadRequest, (await CambiarAsync(nav, completa, "no-es-fecha", "programada", 0)).StatusCode);
         Assert.Equal(HttpStatusCode.NotFound, (await CambiarAsync(nav, Guid.NewGuid(), Lunes, "programada", 0)).StatusCode);
-        Assert.DoesNotContain(await ListarAsync(nav, Lunes), j => j.RutaId == completa || j.RutaId == incompleta);
+        Assert.DoesNotContain(await ListarAsync(nav, Lunes), j => j.RutaId == completa); // las peticiones inválidas no dejan rastro
 
         using var lector = await SesionAsync(escribir: false);
         Assert.Equal(HttpStatusCode.Forbidden, (await CambiarAsync(lector, completa, Lunes, "programada", 0)).StatusCode);

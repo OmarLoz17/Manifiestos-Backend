@@ -16,7 +16,8 @@ public interface IRepositorioJornadas
 
 /// <summary>
 /// Jornadas de ruta (migración 0019): Operaciones publica la ruta de una fecha para que el operador la vea.
-/// Sin fila = borrador. El panel solo cambia entre borrador, programada y cancelada; en_curso y completada son de la app.
+/// Sin fila = programada: las rutas fijas ya están programadas para repetirse y solo se confirman si tienen cambios (borrador), decisión del 9-nov-2026.
+/// El panel solo cambia entre programada, borrador y cancelada; en_curso y completada son de la app.
 /// </summary>
 public sealed class RepositorioJornadas(NpgsqlDataSource datos) : IRepositorioJornadas
 {
@@ -33,7 +34,7 @@ public sealed class RepositorioJornadas(NpgsqlDataSource datos) : IRepositorioJo
     {
         ("borrador", "programada" or "cancelada") => true,
         ("programada", "borrador" or "cancelada") => true,
-        ("cancelada", "borrador") => true,
+        ("cancelada", "programada" or "borrador") => true,
         _ => false,
     };
 
@@ -81,7 +82,7 @@ public sealed class RepositorioJornadas(NpgsqlDataSource datos) : IRepositorioJo
 
             await using (var cmd = tx.Comando("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", $"jornada:{ruta}:{fecha:yyyy-MM-dd}"))
                 await cmd.ExecuteNonQueryAsync(ct);
-            Guid? jornada = null; int actual = 0; string estadoActual = "borrador";
+            Guid? jornada = null; int actual = 0; string estadoActual = "programada";
             await using (var cmd = tx.Comando("""
                 SELECT j.id, e.revision, e.estado FROM negocio.jornada j
                 JOIN LATERAL (SELECT x.revision, x.estado FROM negocio.estado_jornada x
@@ -114,8 +115,8 @@ public sealed class RepositorioJornadas(NpgsqlDataSource datos) : IRepositorioJo
                 jornada = Guid.NewGuid();
                 await using (var cmd = tx.Comando("INSERT INTO negocio.jornada (organizacion_id, sucursal_id, id, ruta_id, fecha) VALUES ($1, $2, $3, $4, $5::date)", organizacion, sucursal, jornada.Value, ruta, fecha))
                     await cmd.ExecuteNonQueryAsync(ct);
-                // Toda jornada con fila tiene su revisión 1 en borrador; el cambio pedido es la 2.
-                await using (var cmd = tx.Comando("INSERT INTO negocio.estado_jornada (organizacion_id, sucursal_id, jornada_id, revision, estado) VALUES ($1, $2, $3, 1, 'borrador')", organizacion, sucursal, jornada.Value))
+                // Toda jornada con fila tiene su revisión 1 en programada (el estado por omisión); el cambio pedido es la 2.
+                await using (var cmd = tx.Comando("INSERT INTO negocio.estado_jornada (organizacion_id, sucursal_id, jornada_id, revision, estado) VALUES ($1, $2, $3, 1, 'programada')", organizacion, sucursal, jornada.Value))
                     await cmd.ExecuteNonQueryAsync(ct);
                 actual = 1;
             }
