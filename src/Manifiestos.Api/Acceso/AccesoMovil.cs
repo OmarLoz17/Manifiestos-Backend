@@ -33,6 +33,20 @@ public sealed class RepositorioAccesoMovil(NpgsqlDataSource datos)
         cmd.Parameters.AddWithValue(fecha);
         return await cmd.ExecuteScalarAsync(ct) as string;
     }
+    /// <summary>Registra una captura (hecho recibido) con el sobre EXACTO; idempotente por (instalación, id). Ver migración 0024.</summary>
+    public async Task<string> RecibirCapturaAsync(Guid org, Guid acceso, Guid instalacion, byte[] solicitud, CancellationToken ct)
+    {
+        await using var cmd = datos.CreateCommand("SELECT sync.recibir_captura($1,$2,$3,$4)::text");
+        cmd.Parameters.AddWithValue(org); cmd.Parameters.AddWithValue(acceso); cmd.Parameters.AddWithValue(instalacion);
+        cmd.Parameters.AddWithValue(solicitud);
+        return (string)(await cmd.ExecuteScalarAsync(ct))!;
+    }
+    public async Task<string?> ConsultarCapturaAsync(Guid org, Guid acceso, Guid instalacion, Guid captura, CancellationToken ct)
+    {
+        await using var cmd = datos.CreateCommand("SELECT sync.consultar_captura($1,$2,$3,$4)::text");
+        cmd.Parameters.AddWithValue(org); cmd.Parameters.AddWithValue(acceso); cmd.Parameters.AddWithValue(instalacion); cmd.Parameters.AddWithValue(captura);
+        return await cmd.ExecuteScalarAsync(ct) as string;
+    }
     public async Task<Guid?> CrearDesafioAsync(Guid org, Guid instalacion, byte[] hash, CancellationToken ct)
     {
         await using var cmd = datos.CreateCommand("SELECT seguridad.crear_desafio_movil($1,$2,$3)");
@@ -144,6 +158,37 @@ public static class AccesoMovil
             http.Response.Headers.ETag=huella;
             if (http.Request.Headers.IfNoneMatch==huella) return Results.StatusCode(StatusCodes.Status304NotModified);
             return Results.Text(json,"application/json",Encoding.UTF8);
+        }).RequireAuthorization(Politica);
+    }
+    public static void MapearCapturasMovil(this IEndpointRouteBuilder app)
+    {
+        // Recepción de capturas (A6a). Solo guarda hechos: no genera manifiestos, folios ni incidencias de panel.
+        var g=app.MapGroup("/api/movil/capturas");
+        g.AddEndpointFilter(async (c,next) => {
+            c.HttpContext.Response.Headers.CacheControl="no-store";
+            if (!c.HttpContext.Request.IsHttps) return Results.BadRequest(new MensajeError("El acceso móvil requiere HTTPS."));
+            return await next(c);
+        });
+        g.MapPost("", async (HttpContext http,RepositorioAccesoMovil repo,IOptions<OpcionesAcceso> opciones) => {
+            if (!(http.Request.ContentType??"").StartsWith("application/json",StringComparison.OrdinalIgnoreCase))
+                return Results.Json(new MensajeError("El envío debe ser JSON."),statusCode:415);
+            // El sobre se conserva byte a byte: no se deserializa ni se reescribe antes de guardarlo.
+            using var ms=new MemoryStream(); var buffer=new byte[8192]; int n; long total=0;
+            while ((n=await http.Request.Body.ReadAsync(buffer,http.RequestAborted))>0) {
+                total+=n; if (total>262144) return Results.Json(new MensajeError("El envío es demasiado grande."),statusCode:413);
+                ms.Write(buffer,0,n);
+            }
+            var c=(ContextoOperador)http.Items[ItemContexto]!;
+            try { return Results.Text(await repo.RecibirCapturaAsync(opciones.Value.OrganizacionId,c.AccesoId,c.InstalacionId,ms.ToArray(),http.RequestAborted),"application/json",Encoding.UTF8); }
+            catch (PostgresException e) when (e.SqlState=="42501") { return Rechazo(); }
+            catch (PostgresException e) when (e.SqlState=="P0409") { return Results.Json(new MensajeError("Esa captura ya se recibió con otro contenido."),statusCode:409); }
+            catch (PostgresException e) when (e.SqlState is "22023" or "22P02" or "22003" or "22007" or "23502" or "23514" or "23503" or "23505")
+                { return Results.BadRequest(new MensajeError("El envío no es válido.")); }
+        }).RequireAuthorization(Politica);
+        g.MapGet("/{id:guid}", async (Guid id,HttpContext http,RepositorioAccesoMovil repo,IOptions<OpcionesAcceso> opciones) => {
+            var c=(ContextoOperador)http.Items[ItemContexto]!;
+            var json=await repo.ConsultarCapturaAsync(opciones.Value.OrganizacionId,c.AccesoId,c.InstalacionId,id,http.RequestAborted);
+            return json is null ? Results.NotFound() : Results.Text(json,"application/json",Encoding.UTF8);
         }).RequireAuthorization(Politica);
     }
     private static IResult Rechazo() => Results.Json(new MensajeError(EndpointsAcceso.MensajeNoAutorizada),statusCode:403);

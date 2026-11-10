@@ -34,6 +34,7 @@ app.UseRateLimiter();
 
 app.MapearAcceso();
 app.MapearAccesoMovil();
+app.MapearCapturasMovil();
 app.MapearRutas();
 app.MapearClientes();
 app.MapearGeografia();
