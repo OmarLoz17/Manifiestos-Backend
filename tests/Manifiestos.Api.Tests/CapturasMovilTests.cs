@@ -297,6 +297,97 @@ public sealed class CapturasMovilTests(BaseDatosPrueba bd) : IClassFixture<BaseD
         Assert.Equal("0", await ManifiestosDeAsync(inventada));
     }
 
+    // ---- Archivos de evidencia (0026) ----
+
+    private static string ShaDe(byte[] b) => Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(b));
+    private static object FotoReal(Guid id, byte[] bytes) => new
+    {
+        id, rol = "FOTO", sha256 = ShaDe(bytes), tamano = bytes.Length,
+        ubicacion = new { latitud = 25.6866, longitud = -100.3161, precisionMetros = 8.5, fechaEpochMs = 1_790_000_000_000L - 2000 },
+    };
+    private static object FirmaReal(Guid id, string rol, byte[] bytes) => new { id, rol, sha256 = ShaDe(bytes), tamano = bytes.Length, ubicacion = (object?)null };
+
+    private static Task<HttpResponseMessage> SubirAsync(HttpClient http, Guid id, byte[] bytes, string tipo = "image/jpeg")
+    {
+        var contenido = new ByteArrayContent(bytes); contenido.Headers.ContentType = new MediaTypeHeaderValue(tipo);
+        return http.PutAsync($"/api/movil/archivos/{id}", contenido);
+    }
+
+    [Fact]
+    public async Task Sube_el_archivo_verificado_lo_guarda_en_el_vps_encola_drive_y_es_idempotente()
+    {
+        var s = await SesionAsync(); var foto = Guid.NewGuid(); var firma = Guid.NewGuid();
+        byte[] bytesFoto = [1, 2, 3, 4, 5, 6, 7, 8], bytesFirma = [9, 9, 9];
+        var id = Guid.NewGuid();
+        Assert.Equal(HttpStatusCode.OK, (await EnviarAsync(s.Http, Sobre(s, id, evidencias: [FotoReal(foto, bytesFoto), FirmaReal(firma, "FIRMA_OPERADOR", bytesFirma)]))).StatusCode);
+
+        // Contenido distinto con el mismo tamaño, o más grande: se rechaza sin guardar ni registrar nada.
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, (await SubirAsync(s.Http, foto, [8, 7, 6, 5, 4, 3, 2, 1])).StatusCode);
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, (await SubirAsync(s.Http, foto, [1, 2, 3, 4, 5, 6, 7, 8, 9])).StatusCode);
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, (await SubirAsync(s.Http, foto, [1, 2, 3])).StatusCode);
+        Assert.Equal(HttpStatusCode.UnsupportedMediaType, (await SubirAsync(s.Http, foto, bytesFoto, "application/pdf")).StatusCode);
+        Assert.Equal("0", await bd.ConsultarAsync($"SELECT count(*) FROM negocio.archivo WHERE id='{foto}'"));
+        Assert.Empty(Directory.Exists(_api.RutaArchivos) ? Directory.GetFiles(_api.RutaArchivos, "*", SearchOption.AllDirectories) : []);
+
+        Assert.Equal(HttpStatusCode.OK, (await SubirAsync(s.Http, foto, bytesFoto)).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await SubirAsync(s.Http, firma, bytesFirma, "image/png")).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await SubirAsync(s.Http, foto, bytesFoto)).StatusCode);   // reintento: sin duplicar
+        Assert.Equal(2, Directory.GetFiles(_api.RutaArchivos, "*", SearchOption.AllDirectories).Length);
+        var guardado = Directory.GetFiles(_api.RutaArchivos, $"{foto:N}*", SearchOption.AllDirectories).Single();
+        Assert.Equal(bytesFoto, await File.ReadAllBytesAsync(guardado));
+        Assert.Equal("1", await bd.ConsultarAsync($"SELECT count(*) FROM negocio.archivo WHERE id='{foto}'"));
+        Assert.Equal("vps", await bd.ConsultarAsync($"SELECT proveedor FROM negocio.ubicacion_archivo WHERE archivo_id='{foto}'"));
+        Assert.Equal("1", await bd.ConsultarAsync($"SELECT count(*) FROM sync.tarea WHERE clave='drive:{foto}' AND tipo='subir_drive' AND completada_en IS NULL"));
+        // La consulta de la captura refleja lo recibido.
+        var estado = JsonDocument.Parse(await (await s.Http.GetAsync($"/api/movil/capturas/{id}")).Content.ReadAsStringAsync()).RootElement;
+        Assert.All(estado.GetProperty("evidencias").EnumerateArray(), e => Assert.Equal("recibida", e.GetProperty("estado").GetString()));
+    }
+
+    [Fact]
+    public async Task Otro_operador_no_puede_subir_ni_ver_las_evidencias_ajenas()
+    {
+        var a = await SesionAsync(); var b = await SesionAsync(); var foto = Guid.NewGuid(); byte[] bytes = [1, 2, 3];
+        Assert.Equal(HttpStatusCode.OK, (await EnviarAsync(a.Http, Sobre(a, Guid.NewGuid(), evidencias: [FotoReal(foto, bytes), FirmaReal(Guid.NewGuid(), "FIRMA_OPERADOR", [4])]))).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await SubirAsync(b.Http, foto, bytes)).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await SubirAsync(a.Http, Guid.NewGuid(), bytes)).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await SubirAsync(_api.NuevoNavegador(), foto, bytes)).StatusCode);
+        Assert.Equal("0", await bd.ConsultarAsync($"SELECT count(*) FROM negocio.archivo WHERE id='{foto}'"));
+    }
+
+    [Fact]
+    public async Task La_foto_de_un_problema_crea_un_aviso_de_incidencia_una_sola_vez()
+    {
+        var s = await SesionAsync(); var o = await OrdenesAsync(s, fosas: 1, autorizado: true);
+        var foto = Guid.NewGuid(); byte[] bytes = [7, 7, 7, 7]; var captura = Guid.NewGuid();
+        var sobre = Sobre(s, captura, "PROBLEMA", evidencias: [FotoReal(foto, bytes)], problema: new { motivo = "cliente_ausente", comentario = "Nadie abrió" },
+            orden: o.Ordenes[0], jornada: o.Jornada);
+        Assert.Equal(HttpStatusCode.OK, (await EnviarAsync(s.Http, sobre)).StatusCode);
+        Assert.Equal("0", await bd.ConsultarAsync($"SELECT count(*) FROM negocio.incidencia WHERE evidencia_archivo_id='{foto}'"));   // aún sin archivo
+        Assert.Equal(HttpStatusCode.OK, (await SubirAsync(s.Http, foto, bytes)).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await SubirAsync(s.Http, foto, bytes)).StatusCode);
+        Assert.Equal("1", await bd.ConsultarAsync($"SELECT count(*) FROM negocio.incidencia WHERE evidencia_archivo_id='{foto}'"));
+        Assert.Equal("cliente_ausente", await bd.ConsultarAsync($"SELECT motivo FROM negocio.incidencia WHERE evidencia_archivo_id='{foto}'"));
+        Assert.Equal(s.Equipo.Persona.ToString(), await bd.ConsultarAsync($"SELECT persona_id FROM negocio.incidencia WHERE evidencia_archivo_id='{foto}'"));
+        Assert.Equal(o.Cliente.ToString(), await bd.ConsultarAsync($"SELECT cliente_id FROM negocio.incidencia WHERE evidencia_archivo_id='{foto}'"));
+        Assert.Equal("0", await ManifiestosDeAsync(o.Ordenes[0]));   // un aviso no completa ni cancela la orden
+    }
+
+    [Fact]
+    public async Task Las_plantas_son_los_sitios_que_no_son_punto_de_servicio_y_usan_etag()
+    {
+        var s = await SesionAsync(); var ptar = Guid.NewGuid();
+        await bd.SqlComoDuenoAsync($"""
+            INSERT INTO negocio.sitio VALUES ('{Org}', '{Suc}', '{ptar}', 'PTAR Ficticia Plantas');
+            """);
+        var r = await s.Http.GetAsync("/api/movil/plantas");
+        Assert.Equal(HttpStatusCode.OK, r.StatusCode);
+        var lista = JsonDocument.Parse(await r.Content.ReadAsStringAsync()).RootElement.EnumerateArray().ToList();
+        Assert.Contains(lista, p => p.GetProperty("id").GetGuid() == ptar && p.GetProperty("nombre").GetString() == "PTAR Ficticia Plantas");
+        var req = new HttpRequestMessage(HttpMethod.Get, "/api/movil/plantas"); req.Headers.TryAddWithoutValidation("If-None-Match", r.Headers.ETag!.ToString());
+        Assert.Equal(HttpStatusCode.NotModified, (await s.Http.SendAsync(req)).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await _api.NuevoNavegador().GetAsync("/api/movil/plantas")).StatusCode);
+    }
+
     [Fact]
     public async Task Un_problema_no_cuenta_como_paso_ni_arma_manifiesto()
     {

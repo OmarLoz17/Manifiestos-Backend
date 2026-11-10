@@ -47,6 +47,27 @@ public sealed class RepositorioAccesoMovil(NpgsqlDataSource datos)
         cmd.Parameters.AddWithValue(org); cmd.Parameters.AddWithValue(acceso); cmd.Parameters.AddWithValue(instalacion); cmd.Parameters.AddWithValue(captura);
         return await cmd.ExecuteScalarAsync(ct) as string;
     }
+    public sealed record EvidenciaEsperada(long Tamano, byte[] Sha256, string Rol, bool Recibida);
+    public async Task<EvidenciaEsperada?> EvidenciaEsperadaAsync(Guid org, Guid acceso, Guid instalacion, Guid evidencia, CancellationToken ct)
+    {
+        await using var cmd = datos.CreateCommand("SELECT tamano_bytes, sha256, rol, recibida FROM sync.evidencia_esperada($1,$2,$3,$4)");
+        cmd.Parameters.AddWithValue(org); cmd.Parameters.AddWithValue(acceso); cmd.Parameters.AddWithValue(instalacion); cmd.Parameters.AddWithValue(evidencia);
+        await using var r = await cmd.ExecuteReaderAsync(ct);
+        return await r.ReadAsync(ct) ? new(r.GetInt64(0), (byte[])r[1], r.GetString(2), r.GetBoolean(3)) : null;
+    }
+    public async Task<string?> RegistrarArchivoAsync(Guid org, Guid acceso, Guid instalacion, Guid evidencia, string mime, string clave, CancellationToken ct)
+    {
+        await using var cmd = datos.CreateCommand("SELECT sync.registrar_archivo($1,$2,$3,$4,$5,$6)::text");
+        cmd.Parameters.AddWithValue(org); cmd.Parameters.AddWithValue(acceso); cmd.Parameters.AddWithValue(instalacion);
+        cmd.Parameters.AddWithValue(evidencia); cmd.Parameters.AddWithValue(mime); cmd.Parameters.AddWithValue(clave);
+        return await cmd.ExecuteScalarAsync(ct) as string;
+    }
+    public async Task<string> PlantasAsync(Guid org, Guid acceso, Guid instalacion, CancellationToken ct)
+    {
+        await using var cmd = datos.CreateCommand("SELECT seguridad.plantas_operador($1,$2,$3)::text");
+        cmd.Parameters.AddWithValue(org); cmd.Parameters.AddWithValue(acceso); cmd.Parameters.AddWithValue(instalacion);
+        return (string)(await cmd.ExecuteScalarAsync(ct))!;
+    }
     public async Task<Guid?> CrearDesafioAsync(Guid org, Guid instalacion, byte[] hash, CancellationToken ct)
     {
         await using var cmd = datos.CreateCommand("SELECT seguridad.crear_desafio_movil($1,$2,$3)");
@@ -189,6 +210,56 @@ public static class AccesoMovil
             var c=(ContextoOperador)http.Items[ItemContexto]!;
             var json=await repo.ConsultarCapturaAsync(opciones.Value.OrganizacionId,c.AccesoId,c.InstalacionId,id,http.RequestAborted);
             return json is null ? Results.NotFound() : Results.Text(json,"application/json",Encoding.UTF8);
+        }).RequireAuthorization(Politica);
+
+        // Plantas (PTAR) para el paso 3. Lista provisional: sitios que no son punto de servicio (ver migración 0026).
+        app.MapGet("/api/movil/plantas",async (HttpContext http,RepositorioAccesoMovil repo,IOptions<OpcionesAcceso> opciones) => {
+            if (!http.Request.IsHttps) return Results.BadRequest(new MensajeError("El acceso móvil requiere HTTPS."));
+            http.Response.Headers.CacheControl="no-store";
+            var c=(ContextoOperador)http.Items[ItemContexto]!;
+            var json=await repo.PlantasAsync(opciones.Value.OrganizacionId,c.AccesoId,c.InstalacionId,http.RequestAborted);
+            var huella="\""+Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(json)))+"\"";
+            http.Response.Headers.ETag=huella;
+            if (http.Request.Headers.IfNoneMatch==huella) return Results.StatusCode(StatusCodes.Status304NotModified);
+            return Results.Text(json,"application/json",Encoding.UTF8);
+        }).RequireAuthorization(Politica);
+
+        // Archivos de evidencia: el cuerpo se verifica contra el tamaño y SHA-256 DECLARADOS en el sobre antes de guardarse;
+        // se guarda primero en el VPS y la subida a Drive la hará solo el backend (tarea encolada, no ejecutada aquí).
+        app.MapPut("/api/movil/archivos/{id:guid}",async (Guid id,HttpContext http,RepositorioAccesoMovil repo,IOptions<OpcionesAcceso> opciones,
+            IConfiguration config,IWebHostEnvironment entorno) => {
+            if (!http.Request.IsHttps) return Results.BadRequest(new MensajeError("El acceso móvil requiere HTTPS."));
+            http.Response.Headers.CacheControl="no-store";
+            var org=opciones.Value.OrganizacionId; var c=(ContextoOperador)http.Items[ItemContexto]!; var ct=http.RequestAborted;
+            var esperado=await repo.EvidenciaEsperadaAsync(org,c.AccesoId,c.InstalacionId,id,ct);
+            if (esperado is null) return Results.NotFound();
+            if (esperado.Recibida) return Results.Ok(new { estado="recibida",id });   // reintento: no se vuelve a leer ni a guardar
+            var mime=(http.Request.ContentType??"").Split(';')[0].Trim().ToLowerInvariant();
+            if (mime is not ("image/jpeg" or "image/png")) return Results.Json(new MensajeError("Tipo de archivo no permitido."),statusCode:415);
+            var raiz=config["Archivos:Ruta"] ?? (entorno.IsDevelopment() ? Path.GetFullPath(Path.Combine(entorno.ContentRootPath,"..","..",".local","archivos")) : null);
+            if (raiz is null) return Results.Json(new MensajeError("El almacenamiento de archivos no está configurado."),statusCode:503);
+            var relativa=Path.Combine(org.ToString("N"),id.ToString("N")[..2],id.ToString("N")+(mime=="image/png"?".png":".jpg"));
+            var destino=Path.Combine(raiz,relativa); Directory.CreateDirectory(Path.GetDirectoryName(destino)!);
+            var temporal=destino+".parcial-"+Guid.NewGuid().ToString("N");
+            try {
+                long total=0; using var hash=IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+                await using (var salida=new FileStream(temporal,FileMode.CreateNew,FileAccess.Write,FileShare.None,81920,FileOptions.WriteThrough)) {
+                    var buffer=new byte[81920]; int n;
+                    while ((n=await http.Request.Body.ReadAsync(buffer,ct))>0) {
+                        total+=n;
+                        if (total>esperado.Tamano) return Results.Json(new MensajeError("El archivo no coincide con lo declarado."),statusCode:422);
+                        hash.AppendData(buffer,0,n); await salida.WriteAsync(buffer.AsMemory(0,n),ct);
+                    }
+                    await salida.FlushAsync(ct);
+                }
+                if (total!=esperado.Tamano || !hash.GetHashAndReset().AsSpan().SequenceEqual(esperado.Sha256))
+                    return Results.Json(new MensajeError("El archivo no coincide con lo declarado."),statusCode:422);
+                if (File.Exists(destino)) File.Delete(temporal); else File.Move(temporal,destino);   // idempotente ante reintentos concurrentes
+                var json=await repo.RegistrarArchivoAsync(org,c.AccesoId,c.InstalacionId,id,mime,relativa.Replace('\\','/'),ct);
+                return json is null ? Results.NotFound() : Results.Text(json,"application/json",Encoding.UTF8);
+            }
+            catch (PostgresException e) when (e.SqlState=="42501") { return Rechazo(); }
+            finally { try { if (File.Exists(temporal)) File.Delete(temporal); } catch (IOException) { /* queda para limpieza; nunca borra evidencia ya verificada */ } }
         }).RequireAuthorization(Politica);
     }
     private static IResult Rechazo() => Results.Json(new MensajeError(EndpointsAcceso.MensajeNoAutorizada),statusCode:403);

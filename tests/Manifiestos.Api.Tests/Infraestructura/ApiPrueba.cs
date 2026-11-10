@@ -31,8 +31,18 @@ public sealed class ApiPrueba(BaseDatosPrueba bd) : WebApplicationFactory<Progra
     /// <summary>Organización que atiende la API de prueba (la de BaseDatosPrueba salvo que la prueba siembre otra).</summary>
     public Guid Organizacion { get; init; } = BaseDatosPrueba.Organizacion;
 
+    /// <summary>Almacén temporal de archivos de evidencia de esta API de prueba (se elimina al terminar).</summary>
+    public string RutaArchivos { get; } = Path.Combine(Path.GetTempPath(), "manifiestos-pruebas-" + Guid.NewGuid().ToString("N"));
+
+    protected override void Dispose(bool disposing)
+    {
+        base.Dispose(disposing);
+        if (disposing) try { if (Directory.Exists(RutaArchivos)) Directory.Delete(RutaArchivos, true); } catch (IOException) { }
+    }
+
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
+        builder.UseSetting("Archivos:Ruta", RutaArchivos);
         // "Testing" evita cargar User Secrets del desarrollador.
         builder.UseEnvironment("Testing");
         builder.UseSetting("ConnectionStrings:Manifiestos", bd.CadenaConexion);
