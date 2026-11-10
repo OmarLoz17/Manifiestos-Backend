@@ -25,6 +25,14 @@ public sealed class RepositorioAccesoMovil(NpgsqlDataSource datos)
         cmd.Parameters.AddWithValue(org); cmd.Parameters.AddWithValue(sesion);
         return (string)(await cmd.ExecuteScalarAsync(ct))!;
     }
+    /// <summary>Trabajo del día del operador autenticado (JSON ya armado en la base, solo lectura). Null = sin contexto vigente.</summary>
+    public async Task<string?> TrabajoAsync(Guid org, Guid acceso, Guid instalacion, DateOnly fecha, CancellationToken ct)
+    {
+        await using var cmd = datos.CreateCommand("SELECT seguridad.trabajo_operador($1,$2,$3,$4)::text");
+        cmd.Parameters.AddWithValue(org); cmd.Parameters.AddWithValue(acceso); cmd.Parameters.AddWithValue(instalacion);
+        cmd.Parameters.AddWithValue(fecha);
+        return await cmd.ExecuteScalarAsync(ct) as string;
+    }
     public async Task<Guid?> CrearDesafioAsync(Guid org, Guid instalacion, byte[] hash, CancellationToken ct)
     {
         await using var cmd = datos.CreateCommand("SELECT seguridad.crear_desafio_movil($1,$2,$3)");
@@ -115,6 +123,27 @@ public static class AccesoMovil
         g.MapPost("/logout", async (HttpContext http,RepositorioAccesoMovil repo) => {
             LeerSesion(http.User,out var org,out var sesion); await repo.CerrarAsync(org,sesion,http.RequestAborted);
             return Results.NoContent();
+        }).RequireAuthorization(Politica);
+
+        // Trabajo del día (A5): solo lectura, limitado a la persona de la sesión. Sin capturas/firmas/manifiestos previos.
+        var t=app.MapGroup("/api/movil/trabajo");
+        t.AddEndpointFilter(async (c,next) => {
+            c.HttpContext.Response.Headers.CacheControl="no-store";
+            if (!c.HttpContext.Request.IsHttps) return Results.BadRequest(new MensajeError("El acceso móvil requiere HTTPS."));
+            return await next(c);
+        });
+        t.MapGet("", async (string? fecha,HttpContext http,RepositorioAccesoMovil repo,IOptions<OpcionesAcceso> opciones) => {
+            if (!DateOnly.TryParseExact(fecha,"yyyy-MM-dd",out var f)) return Results.BadRequest(new MensajeError("Indica la fecha como AAAA-MM-DD."));
+            var c=(ContextoOperador)http.Items[ItemContexto]!;
+            string? json;
+            try { json=await repo.TrabajoAsync(opciones.Value.OrganizacionId,c.AccesoId,c.InstalacionId,f,http.RequestAborted); }
+            catch (PostgresException e) when (e.SqlState=="22023") { return Results.BadRequest(new MensajeError("Solo se descarga el trabajo de hoy.")); }
+            if (json is null) return Rechazo();
+            // Huella para que el teléfono compare versiones sin reinterpretar el contenido.
+            var huella="\""+Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(json)))+"\"";
+            http.Response.Headers.ETag=huella;
+            if (http.Request.Headers.IfNoneMatch==huella) return Results.StatusCode(StatusCodes.Status304NotModified);
+            return Results.Text(json,"application/json",Encoding.UTF8);
         }).RequireAuthorization(Politica);
     }
     private static IResult Rechazo() => Results.Json(new MensajeError(EndpointsAcceso.MensajeNoAutorizada),statusCode:403);
