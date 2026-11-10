@@ -4,7 +4,7 @@ using Microsoft.Extensions.Options;
 namespace Manifiestos.Api.Acceso;
 
 /// <summary>Identidad extraída de un ID token de Google ya validado.</summary>
-public sealed record IdentidadGoogle(string Emisor, string Sujeto, string Correo, bool CorreoVerificado, string? Nombre);
+public sealed record IdentidadGoogle(string Emisor, string Sujeto, string Correo, bool CorreoVerificado, string? Nombre, string? Nonce = null);
 
 /// <summary>Sustituible en pruebas. Devuelve null si el token no es válido.</summary>
 public interface IValidadorTokenGoogle
@@ -36,7 +36,7 @@ public sealed class ValidadorTokenGoogle(IOptions<OpcionesAcceso> opciones, ILog
         {
             var p = await GoogleJsonWebSignature.ValidateAsync(idToken, CrearConfiguracion());
             if (string.IsNullOrWhiteSpace(p.Subject) || string.IsNullOrWhiteSpace(p.Email)) return null;
-            return new IdentidadGoogle(EmisorGoogle, p.Subject, p.Email, p.EmailVerified, p.Name);
+            return new IdentidadGoogle(EmisorGoogle, p.Subject, p.Email, p.EmailVerified, p.Name, p.Nonce);
         }
         // Token mal formado o rechazado. Los fallos de red al obtener las claves de Google
         // no se capturan: son un problema del servidor, no del token.

@@ -14,6 +14,7 @@ var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AgregarProxyConfiable(builder.Configuration);
 builder.Services.AgregarAccesoWeb();
+builder.Services.AgregarAccesoMovil();
 builder.Services.AgregarRutas();
 builder.Services.AgregarClientes();
 builder.Services.AgregarGeografia();
@@ -32,6 +33,7 @@ app.UseAuthorization();
 app.UseRateLimiter();
 
 app.MapearAcceso();
+app.MapearAccesoMovil();
 app.MapearRutas();
 app.MapearClientes();
 app.MapearGeografia();

@@ -66,7 +66,7 @@ public static class ServiciosAcceso
 
         // Todo endpoint exige sesión salvo los marcados explícitamente como anónimos.
         services.AddAuthorizationBuilder()
-            .SetFallbackPolicy(new AuthorizationPolicyBuilder().RequireAuthenticatedUser().Build());
+            .SetFallbackPolicy(new AuthorizationPolicyBuilder(CookieAuthenticationDefaults.AuthenticationScheme).RequireAuthenticatedUser().Build());
 
         services.AddAntiforgery(o =>
         {

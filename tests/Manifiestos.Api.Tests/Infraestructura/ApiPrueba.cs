@@ -14,14 +14,14 @@ namespace Manifiestos.Api.Tests.Infraestructura;
 /// </summary>
 public sealed class ValidadorFicticio : IValidadorTokenGoogle
 {
-    public static string Token(string sujeto, string correo, bool verificado = true, string nombre = "Persona Ficticia") =>
-        $"{sujeto}|{correo}|{verificado}|{nombre}";
+    public static string Token(string sujeto, string correo, bool verificado = true, string nombre = "Persona Ficticia", string? nonce = null) =>
+        $"{sujeto}|{correo}|{verificado}|{nombre}" + (nonce is null ? "" : $"|{nonce}");
 
     public Task<IdentidadGoogle?> ValidarAsync(string idToken, CancellationToken ct)
     {
         var p = idToken.Split('|');
-        return Task.FromResult(p.Length == 4 && bool.TryParse(p[2], out var v)
-            ? new IdentidadGoogle(ValidadorTokenGoogle.EmisorGoogle, p[0], p[1], v, p[3])
+        return Task.FromResult(p.Length is 4 or 5 && bool.TryParse(p[2], out var v)
+            ? new IdentidadGoogle(ValidadorTokenGoogle.EmisorGoogle, p[0], p[1], v, p[3], p.Length==5 ? p[4] : null)
             : null);
     }
 }
