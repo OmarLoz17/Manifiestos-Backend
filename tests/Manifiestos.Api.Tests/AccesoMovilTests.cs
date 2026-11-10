@@ -99,7 +99,7 @@ public sealed class AccesoMovilTests(BaseDatosPrueba bd) : IClassFixture<BaseDat
         Assert.Equal(HttpStatusCode.OK,(await cliente.PostAsJsonAsync("/api/movil/auth/refresh",new{tokens.RefreshToken})).StatusCode);
         Assert.Equal(HttpStatusCode.NoContent,(await cliente.PostAsync("/api/movil/auth/logout",null)).StatusCode);
         Assert.Equal(HttpStatusCode.Forbidden,(await cliente.GetAsync("/api/movil/auth/me")).StatusCode);
-        Assert.Equal(HttpStatusCode.Unauthorized,(await cliente.PostAsJsonAsync("/api/movil/auth/refresh",new{tokens.RefreshToken})).StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden,(await cliente.PostAsJsonAsync("/api/movil/auth/refresh",new{tokens.RefreshToken})).StatusCode);
     }
     [Theory] [InlineData("baja")] [InlineData("rol")] [InlineData("equipo")] [InlineData("asignacion")] [InlineData("persona")]
     public async Task Revalida_cada_peticion_y_renovacion(string cambio)
@@ -114,7 +114,7 @@ public sealed class AccesoMovilTests(BaseDatosPrueba bd) : IClassFixture<BaseDat
             _=>$"INSERT INTO negocio.operador_ficha(organizacion_id,sucursal_id,persona_id,revision,nombre_completo,correo) VALUES('{org}','{BaseDatosPrueba.Sucursal}','{e.Persona}',2,'Otro titular',NULL)"
         });
         Assert.Equal(HttpStatusCode.Forbidden,(await cliente.GetAsync("/api/movil/auth/me")).StatusCode);
-        Assert.Equal(HttpStatusCode.Unauthorized,(await cliente.PostAsJsonAsync("/api/movil/auth/refresh",new{tokens.RefreshToken})).StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden,(await cliente.PostAsJsonAsync("/api/movil/auth/refresh",new{tokens.RefreshToken})).StatusCode);
     }
     [Fact] public async Task Desafio_expirado_token_invalido_y_refresh_alterado_no_entran()
     {
@@ -147,5 +147,42 @@ public sealed class AccesoMovilTests(BaseDatosPrueba bd) : IClassFixture<BaseDat
         Assert.Single(respuestas,r=>r.StatusCode==HttpStatusCode.OK);
         Assert.Equal(3,respuestas.Count(r=>r.StatusCode==HttpStatusCode.Forbidden));
         Assert.Equal("1",await bd.ConsultarAsync($"SELECT count(*) FROM seguridad.sesion_movil WHERE instalacion_id='{e.Instalacion}'"));
+    }
+    [Fact] public async Task Renovacion_prolongada_conserva_sesion_y_persona_sin_otro_login()
+    {
+        var e=await PrepararAsync(); var (cliente,tokens)=await SesionAsync(e);
+        var o=_api.Services.GetRequiredService<IOptionsMonitor<BearerTokenOptions>>().Get(AccesoMovil.Esquema);
+        Assert.True(o.RefreshTokenProtector.Unprotect(tokens.RefreshToken)!.Properties.ExpiresUtc>DateTimeOffset.UtcNow.AddDays(29));
+        // Simula una sesión creada hace semanas, aún dentro de su ventana de renovación.
+        await bd.SqlComoDuenoAsync($"UPDATE seguridad.sesion_movil SET creada_en=now()-interval '40 days', vence_en=now()+interval '1 day' WHERE instalacion_id='{e.Instalacion}'");
+        var respuesta=await cliente.PostAsJsonAsync("/api/movil/auth/refresh",new{tokens.RefreshToken});
+        Assert.Equal(HttpStatusCode.OK,respuesta.StatusCode);
+        var nuevos=(await respuesta.Content.ReadFromJsonAsync<Tokens>())!;
+        cliente.DefaultRequestHeaders.Authorization=new("Bearer",nuevos.AccessToken);
+        Assert.Equal(e.Persona,(await cliente.GetFromJsonAsync<UsuarioMovil>("/api/movil/auth/me"))!.Operador.PersonaId);
+        Assert.Equal("1",await bd.ConsultarAsync($"SELECT count(*) FROM seguridad.sesion_movil WHERE instalacion_id='{e.Instalacion}' AND vence_en>now()+interval '29 days'"));
+        Assert.Equal("1",await bd.ConsultarAsync($"SELECT count(*) FROM seguridad.inicio_sesion i JOIN seguridad.acceso_autorizado a ON a.id=i.acceso_id WHERE a.correo_permitido='{e.Correo}' AND i.canal='movil' AND i.resultado='aceptado'"));
+        Assert.Equal(HttpStatusCode.NoContent,(await cliente.PostAsync("/api/movil/auth/logout",null)).StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden,(await cliente.PostAsJsonAsync("/api/movil/auth/refresh",new{nuevos.RefreshToken})).StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden,(await cliente.PostAsJsonAsync("/api/movil/auth/refresh",new{tokens.RefreshToken})).StatusCode);
+    }
+    [Fact] public async Task Renovar_no_resucita_sesion_caducada_ni_refresh_vencido()
+    {
+        var e=await PrepararAsync(); var (cliente,tokens)=await SesionAsync(e);
+        var o=_api.Services.GetRequiredService<IOptionsMonitor<BearerTokenOptions>>().Get(AccesoMovil.Esquema);
+        var ticket=o.RefreshTokenProtector.Unprotect(tokens.RefreshToken)!;
+        ticket.Properties.ExpiresUtc=DateTimeOffset.UtcNow.AddSeconds(-1);
+        Assert.Equal(HttpStatusCode.Unauthorized,(await cliente.PostAsJsonAsync("/api/movil/auth/refresh",new{refreshToken=o.RefreshTokenProtector.Protect(ticket)})).StatusCode);
+        await bd.SqlComoDuenoAsync($"UPDATE seguridad.sesion_movil SET vence_en=now()-interval '1 second' WHERE instalacion_id='{e.Instalacion}'");
+        Assert.Equal(HttpStatusCode.Unauthorized,(await cliente.PostAsJsonAsync("/api/movil/auth/refresh",new{tokens.RefreshToken})).StatusCode);
+        Assert.Equal("t",await bd.ConsultarAsync($"SELECT vence_en<now() FROM seguridad.sesion_movil WHERE instalacion_id='{e.Instalacion}'"));
+    }
+    [Fact] public async Task Renovaciones_concurrentes_y_logout_no_reactivan_sesion()
+    {
+        var (cliente,tokens)=await SesionAsync(await PrepararAsync());
+        await Task.WhenAll(Enumerable.Range(0,4).Select(_=>cliente.PostAsJsonAsync("/api/movil/auth/refresh",new{tokens.RefreshToken}))
+            .Append(cliente.PostAsync("/api/movil/auth/logout",null)));
+        Assert.Equal(HttpStatusCode.Forbidden,(await cliente.PostAsJsonAsync("/api/movil/auth/refresh",new{tokens.RefreshToken})).StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden,(await cliente.GetAsync("/api/movil/auth/me")).StatusCode);
     }
 }

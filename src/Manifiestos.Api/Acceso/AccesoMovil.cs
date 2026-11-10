@@ -19,6 +19,12 @@ public sealed record UsuarioMovil(Guid OrganizacionId, ContextoOperador Operador
 
 public sealed class RepositorioAccesoMovil(NpgsqlDataSource datos)
 {
+    public async Task<string> RenovarAsync(Guid org, Guid sesion, CancellationToken ct)
+    {
+        await using var cmd = datos.CreateCommand("SELECT seguridad.renovar_sesion_movil($1,$2)");
+        cmd.Parameters.AddWithValue(org); cmd.Parameters.AddWithValue(sesion);
+        return (string)(await cmd.ExecuteScalarAsync(ct))!;
+    }
     public async Task<Guid?> CrearDesafioAsync(Guid org, Guid instalacion, byte[] hash, CancellationToken ct)
     {
         await using var cmd = datos.CreateCommand("SELECT seguridad.crear_desafio_movil($1,$2,$3)");
@@ -57,9 +63,9 @@ public static class AccesoMovil
     public static IServiceCollection AgregarAccesoMovil(this IServiceCollection services)
     {
         services.AddSingleton<RepositorioAccesoMovil>();
-        // Tokens opacos del framework, no JWT/criptografía propios. Sesión de servidor de duración fija.
+        // Tokens opacos del framework. Refresh y sesión se renuevan juntos (migración 0022).
         services.AddAuthentication().AddBearerToken(Esquema, o => {
-            o.BearerTokenExpiration=TimeSpan.FromMinutes(15); o.RefreshTokenExpiration=TimeSpan.FromHours(8);
+            o.BearerTokenExpiration=TimeSpan.FromMinutes(15); o.RefreshTokenExpiration=TimeSpan.FromDays(30);
         });
         services.AddAuthorizationBuilder().AddPolicy(Politica, new AuthorizationPolicyBuilder(Esquema)
             .RequireAuthenticatedUser().RequireAssertion(async c => {
@@ -93,13 +99,16 @@ public static class AccesoMovil
             var sesion=await repo.IniciarAsync(org,identidad,s.InstalacionId,s.DesafioId,http.RequestAborted);
             return sesion is null ? Rechazo() : Emitir(org,sesion.Value);
         }).AllowAnonymous().RequireRateLimiting(ServiciosAcceso.PoliticaLogin);
-        g.MapPost("/refresh", async (SolicitudRenovarMovil s,HttpContext http,IOptionsMonitor<BearerTokenOptions> tokens) => {
+        g.MapPost("/refresh", async (SolicitudRenovarMovil s,HttpContext http,IOptionsMonitor<BearerTokenOptions> tokens,
+            RepositorioAccesoMovil repo,IOptions<OpcionesAcceso> acceso) => {
             if (string.IsNullOrWhiteSpace(s.RefreshToken) || s.RefreshToken.Length>20000) return Results.Unauthorized();
             var opciones=tokens.Get(Esquema);
             var ticket=opciones.RefreshTokenProtector.Unprotect(s.RefreshToken);
             if (ticket?.Properties.ExpiresUtc is not { } vence || vence<=TimeProvider.System.GetUtcNow()
-                || await RevalidarAsync(ticket.Principal,http) is null || !LeerSesion(ticket.Principal,out var org,out var sesion)) return Results.Unauthorized();
-            return Emitir(org,sesion);
+                || !LeerSesion(ticket.Principal,out var org,out var sesion) || org!=acceso.Value.OrganizacionId) return Results.Unauthorized();
+            var resultado=await repo.RenovarAsync(org,sesion,http.RequestAborted);
+            return resultado=="renovada" ? Emitir(org,sesion)
+                : resultado=="caducada" ? Results.Unauthorized() : Rechazo();
         }).AllowAnonymous().RequireRateLimiting(ServiciosAcceso.PoliticaLogin);
         g.MapGet("/me", (HttpContext http,IOptions<OpcionesAcceso> opciones) =>
             Results.Ok(new UsuarioMovil(opciones.Value.OrganizacionId,(ContextoOperador)http.Items[ItemContexto]!))).RequireAuthorization(Politica);
