@@ -50,7 +50,8 @@ public sealed class CapturasMovilTests(BaseDatosPrueba bd) : IClassFixture<BaseD
     private static object Firma(Guid id, string rol) => new { id, rol, sha256 = Sha('b'), tamano = 900, ubicacion = (object?)null };
 
     private static string Sobre(Sesion s, Guid id, string tipo = "SERVICIO_OPERADOR", Guid? persona = null, object[]? evidencias = null,
-        bool aceptado = true, object? planta = null, string? nombre = null, object? problema = null, int version = 1)
+        bool aceptado = true, object? planta = null, string? nombre = null, object? problema = null, int version = 1,
+        Guid? orden = null, Guid? jornada = null, bool requiereCliente = true)
     {
         var o = s.Yo.Operador;
         return JsonSerializer.Serialize(new
@@ -58,8 +59,8 @@ public sealed class CapturasMovilTests(BaseDatosPrueba bd) : IClassFixture<BaseD
             version, id,
             contexto = new { ambitoId = "ambito", personaId = persona ?? o.PersonaId, identidadId = o.IdentidadId, instalacionId = o.InstalacionId,
                 asignacionEquipoId = o.AsignacionEquipoId, revisionEquipo = o.RevisionEquipo.ToString() },
-            trabajo = new { ordenId = Guid.NewGuid(), jornadaId = Guid.NewGuid(), asignacionTrabajoId = "a-1", revisionTrabajo = "1",
-                requiereFirmaCliente = true, versionDatos = "1", datosOrdenJson = "{\"dato\":\"sintetico\"}" },
+            trabajo = new { ordenId = orden ?? Guid.NewGuid(), jornadaId = jornada ?? Guid.NewGuid(), asignacionTrabajoId = "a-1", revisionTrabajo = "1",
+                requiereFirmaCliente = requiereCliente, versionDatos = "1", datosOrdenJson = "{\"dato\":\"sintetico\"}" },
             tipo, fechaEpochMs = 1_790_000_000_000L,
             evidencias = evidencias ?? [Foto(Guid.NewGuid()), Firma(Guid.NewGuid(), "FIRMA_OPERADOR")],
             aceptado = aceptado && tipo != "PROBLEMA" ? new { version = "fixture-1", textoExacto = "Texto ficticio  exacto" } : null,
@@ -164,5 +165,125 @@ public sealed class CapturasMovilTests(BaseDatosPrueba bd) : IClassFixture<BaseD
         Assert.Equal(HttpStatusCode.NotFound, (await b.Http.GetAsync($"/api/movil/capturas/{id}")).StatusCode);
         Assert.Equal(HttpStatusCode.Unauthorized, (await _api.NuevoNavegador().GetAsync($"/api/movil/capturas/{id}")).StatusCode);
         Assert.Equal(HttpStatusCode.Unauthorized, (await EnviarAsync(_api.NuevoNavegador(), Sobre(a, Guid.NewGuid()))).StatusCode);
+    }
+
+    // ---- Fosa fija: una orden = un manifiesto, armado por el servidor al llegar todos los pasos ----
+
+    private static string Hoy => DateOnly.FromDateTime(DateTime.UtcNow).ToString("yyyy-MM-dd");
+    private sealed record Orden(Guid Jornada, Guid[] Ordenes, Guid Cliente);
+
+    /// <summary>Ruta publicada hoy con un cliente y N fosas planeadas; devuelve las órdenes derivadas tal como las descarga el teléfono.</summary>
+    private async Task<Orden> OrdenesAsync(Sesion s, int fosas, bool autorizado)
+    {
+        var (ruta, unidad, parada, sitio, version, empresa, cliente, jornada) = (Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid());
+        await bd.SqlComoDuenoAsync($"""
+            BEGIN;
+            INSERT INTO negocio.ficha_empresa(organizacion_id, empresa_id, revision, nombre_fiscal, nombre_comercial)
+            SELECT '{Org}', '0f000000-0000-4000-8000-000000000002', 1, 'Transportes de Prueba SA de CV', 'Transportes de Prueba'
+            WHERE NOT EXISTS (SELECT 1 FROM negocio.ficha_empresa WHERE empresa_id = '0f000000-0000-4000-8000-000000000002');
+            INSERT INTO negocio.vehiculo VALUES ('{Org}', '{Suc}', '{unidad}', 'FF-{unidad.ToString("N")[..5]}');
+            INSERT INTO negocio.ficha_vehiculo(organizacion_id, sucursal_id, vehiculo_id, revision, capacidad_id, clasificacion) VALUES ('{Org}', '{Suc}', '{unidad}', 1, 2, 'fosas');
+            INSERT INTO negocio.ruta(organizacion_id, sucursal_id, id) VALUES ('{Org}', '{Suc}', '{ruta}');
+            INSERT INTO negocio.ruta_version(organizacion_id, sucursal_id, ruta_id, revision, nombre, dias, vehiculo_id) VALUES ('{Org}', '{Suc}', '{ruta}', 1, 'Ruta Fosa Fija', 127, '{unidad}');
+            INSERT INTO negocio.asignacion_unidad(organizacion_id, sucursal_id, vehiculo_id, revision, persona_id) VALUES ('{Org}', '{Suc}', '{unidad}', 1, '{s.Equipo.Persona}');
+            INSERT INTO negocio.empresa VALUES ('{Org}', '{empresa}', 'CLI-{empresa:N}');
+            INSERT INTO negocio.ficha_empresa(organizacion_id, empresa_id, revision, nombre_comercial) VALUES ('{Org}', '{empresa}', 1, 'Cliente Fosa Fija');
+            INSERT INTO negocio.empresa_sucursal VALUES ('{Org}', '{Suc}', '{empresa}');
+            INSERT INTO negocio.cliente VALUES ('{Org}', '{Suc}', '{cliente}', '{empresa}', 'F-{cliente:N}');
+            INSERT INTO negocio.sitio VALUES ('{Org}', '{Suc}', '{sitio}', 'Sitio fosa fija');
+            INSERT INTO negocio.punto_servicio VALUES ('{Org}', '{Suc}', '{sitio}');
+            INSERT INTO negocio.parada(organizacion_id, sucursal_id, id, ruta_id, posicion) VALUES ('{Org}', '{Suc}', '{parada}', '{ruta}', 1);
+            INSERT INTO negocio.parada_version(organizacion_id, sucursal_id, id, parada_id, revision, sitio_id) VALUES ('{Org}', '{Suc}', '{version}', '{parada}', 1, '{sitio}');
+            INSERT INTO negocio.parada_cliente(organizacion_id, sucursal_id, version_id, cliente_id, fosas_planeadas) VALUES ('{Org}', '{Suc}', '{version}', '{cliente}', {fosas});
+            {(autorizado ? $"INSERT INTO negocio.autorizacion_empresa(organizacion_id, empresa_id, autoridad, finalidad, numero) VALUES ('{Org}', '{empresa}', 'Medio ambiente', 'Generador', 'AUT-FF');" : "")}
+            INSERT INTO negocio.jornada(organizacion_id, sucursal_id, id, ruta_id, fecha) VALUES ('{Org}', '{Suc}', '{jornada}', '{ruta}', '{Hoy}');
+            INSERT INTO negocio.estado_jornada(organizacion_id, sucursal_id, jornada_id, revision, estado) VALUES ('{Org}', '{Suc}', '{jornada}', 1, 'programada');
+            COMMIT;
+            """);
+        var t = JsonDocument.Parse(await (await s.Http.GetAsync($"/api/movil/trabajo?fecha={Hoy}")).Content.ReadAsStringAsync()).RootElement;
+        var j = t.GetProperty("jornadas").EnumerateArray().Single(x => x.GetProperty("jornadaId").GetGuid() == jornada);
+        var ordenes = j.GetProperty("paradas")[0].GetProperty("clientes")[0].GetProperty("ordenes").EnumerateArray().Select(o => o.GetProperty("ordenId").GetGuid()).ToArray();
+        Assert.Equal(fosas, ordenes.Length);
+        return new Orden(jornada, ordenes, cliente);
+    }
+
+    private Task<HttpResponseMessage> PasoAsync(Sesion s, Orden o, int cual, string paso, bool requiereCliente = true) => EnviarAsync(s.Http, paso switch
+    {
+        "servicio" => Sobre(s, Guid.NewGuid(), "SERVICIO_OPERADOR", orden: o.Ordenes[cual], jornada: o.Jornada, requiereCliente: requiereCliente),
+        "cliente" => Sobre(s, Guid.NewGuid(), "FIRMA_CLIENTE", evidencias: [Firma(Guid.NewGuid(), "FIRMA_CLIENTE")], nombre: "Cliente Ficticio",
+            orden: o.Ordenes[cual], jornada: o.Jornada, requiereCliente: requiereCliente),
+        _ => Sobre(s, Guid.NewGuid(), "RECEPCION_PLANTA", evidencias: [Firma(Guid.NewGuid(), "FIRMA_RECEPCION")], nombre: "Quien recibe",
+            planta: new { id = "pta-1", nombre = "PTAR Ficticia" }, orden: o.Ordenes[cual], jornada: o.Jornada, requiereCliente: requiereCliente),
+    });
+
+    private async Task<string> ManifiestosDeAsync(Guid orden) =>
+        await bd.ConsultarAsync($"SELECT count(*) FROM negocio.orden_manifiesto WHERE orden_derivada_id='{orden}'");
+
+    [Fact]
+    public async Task Cliente_autorizado_arma_un_manifiesto_por_orden_solo_al_llegar_los_tres_pasos_y_sin_exponerlo_al_operador()
+    {
+        var s = await SesionAsync(); var o = await OrdenesAsync(s, fosas: 2, autorizado: true);
+        foreach (var paso in new[] { "servicio", "cliente" })
+        {
+            var r = await PasoAsync(s, o, 0, paso);
+            Assert.Equal(HttpStatusCode.OK, r.StatusCode);
+            Assert.DoesNotContain("manifiesto", (await r.Content.ReadAsStringAsync()).ToLowerInvariant());
+            Assert.Equal("0", await ManifiestosDeAsync(o.Ordenes[0]));      // faltan firma y nombre en la planta
+        }
+        var ultima = await PasoAsync(s, o, 0, "planta");
+        Assert.Equal(HttpStatusCode.OK, ultima.StatusCode);
+        Assert.DoesNotContain("manifiesto", (await ultima.Content.ReadAsStringAsync()).ToLowerInvariant());
+        Assert.Equal("1", await ManifiestosDeAsync(o.Ordenes[0]));
+        Assert.Equal("0", await ManifiestosDeAsync(o.Ordenes[1]));          // la segunda vuelta es otra orden y otro manifiesto
+        // Un envío repetido de la planta (otro UUID) no duplica el manifiesto.
+        Assert.Equal(HttpStatusCode.OK, (await PasoAsync(s, o, 0, "planta")).StatusCode);
+        Assert.Equal("1", await ManifiestosDeAsync(o.Ordenes[0]));
+        // Cliente autorizado = generador; la cantidad se estima por regla y el folio queda sin asignar (pendiente).
+        var m = await bd.ConsultarAsync($"SELECT manifiesto_id FROM negocio.orden_manifiesto WHERE orden_derivada_id='{o.Ordenes[0]}'");
+        Assert.Equal("2", await bd.ConsultarAsync($"SELECT count(*) FROM negocio.participante_manifiesto p JOIN negocio.version_manifiesto v ON v.id=p.version_id WHERE v.manifiesto_id='{m}'"));
+        Assert.Equal("estimada", await bd.ConsultarAsync($"SELECT d.naturaleza_cantidad FROM negocio.detalle_manifiesto d JOIN negocio.version_manifiesto v ON v.id=d.version_id WHERE v.manifiesto_id='{m}'"));
+        Assert.Equal("", await bd.ConsultarAsync($"SELECT coalesce(numero_manifiesto,'') FROM negocio.version_manifiesto WHERE manifiesto_id='{m}'"));
+        // Segunda orden: completa sus propios pasos y obtiene su propio manifiesto, en otro orden de llegada.
+        foreach (var paso in new[] { "planta", "servicio", "cliente" }) Assert.Equal(HttpStatusCode.OK, (await PasoAsync(s, o, 1, paso)).StatusCode);
+        Assert.Equal("1", await ManifiestosDeAsync(o.Ordenes[1]));
+        Assert.NotEqual(m, await bd.ConsultarAsync($"SELECT manifiesto_id FROM negocio.orden_manifiesto WHERE orden_derivada_id='{o.Ordenes[1]}'"));
+    }
+
+    [Fact]
+    public async Task Cliente_general_no_pide_firma_del_cliente_y_arma_con_servicio_y_planta()
+    {
+        var s = await SesionAsync(); var o = await OrdenesAsync(s, fosas: 1, autorizado: false);
+        Assert.Equal(HttpStatusCode.OK, (await PasoAsync(s, o, 0, "servicio", requiereCliente: false)).StatusCode);
+        Assert.Equal("0", await ManifiestosDeAsync(o.Ordenes[0]));
+        Assert.Equal(HttpStatusCode.OK, (await PasoAsync(s, o, 0, "planta", requiereCliente: false)).StatusCode);
+        Assert.Equal("1", await ManifiestosDeAsync(o.Ordenes[0]));
+    }
+
+    [Fact]
+    public async Task Orden_inexistente_o_regla_de_firma_distinta_se_guarda_para_revision_sin_armar_manifiesto()
+    {
+        var s = await SesionAsync(); var o = await OrdenesAsync(s, fosas: 1, autorizado: true);
+        var inventada = Guid.NewGuid(); var id1 = Guid.NewGuid();
+        // El hecho se recibe (no se pierde el trabajo del teléfono) pero queda marcado.
+        var r = await EnviarAsync(s.Http, Sobre(s, id1, orden: inventada, jornada: o.Jornada));
+        Assert.Equal(HttpStatusCode.OK, r.StatusCode);
+        Assert.Equal("orden_no_resuelta", await bd.ConsultarAsync($"SELECT motivo FROM negocio.captura_por_revisar WHERE captura_id='{id1}'"));
+        // La regla de firma del sobre contradice al servidor (cliente autorizado sí firma).
+        var id2 = Guid.NewGuid();
+        Assert.Equal(HttpStatusCode.OK, (await EnviarAsync(s.Http, Sobre(s, id2, orden: o.Ordenes[0], jornada: o.Jornada, requiereCliente: false))).StatusCode);
+        Assert.Equal("regla_firma_distinta", await bd.ConsultarAsync($"SELECT motivo FROM negocio.captura_por_revisar WHERE captura_id='{id2}'"));
+        Assert.Equal("0", await ManifiestosDeAsync(o.Ordenes[0]));
+        Assert.Equal("0", await ManifiestosDeAsync(inventada));
+    }
+
+    [Fact]
+    public async Task Un_problema_no_cuenta_como_paso_ni_arma_manifiesto()
+    {
+        var s = await SesionAsync(); var o = await OrdenesAsync(s, fosas: 1, autorizado: false);
+        var p = Sobre(s, Guid.NewGuid(), "PROBLEMA", evidencias: [Foto(Guid.NewGuid())], problema: new { motivo = "sin_acceso", comentario = "" },
+            orden: o.Ordenes[0], jornada: o.Jornada, requiereCliente: false);
+        Assert.Equal(HttpStatusCode.OK, (await EnviarAsync(s.Http, p)).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await PasoAsync(s, o, 0, "planta", requiereCliente: false)).StatusCode);
+        Assert.Equal("0", await ManifiestosDeAsync(o.Ordenes[0]));        // falta el servicio: el problema no lo reemplaza
     }
 }
