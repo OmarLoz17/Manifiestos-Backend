@@ -242,11 +242,32 @@ public sealed class CapturasMovilTests(BaseDatosPrueba bd) : IClassFixture<BaseD
         var m = await bd.ConsultarAsync($"SELECT manifiesto_id FROM negocio.orden_manifiesto WHERE orden_derivada_id='{o.Ordenes[0]}'");
         Assert.Equal("2", await bd.ConsultarAsync($"SELECT count(*) FROM negocio.participante_manifiesto p JOIN negocio.version_manifiesto v ON v.id=p.version_id WHERE v.manifiesto_id='{m}'"));
         Assert.Equal("estimada", await bd.ConsultarAsync($"SELECT d.naturaleza_cantidad FROM negocio.detalle_manifiesto d JOIN negocio.version_manifiesto v ON v.id=d.version_id WHERE v.manifiesto_id='{m}'"));
-        Assert.Equal("", await bd.ConsultarAsync($"SELECT coalesce(numero_manifiesto,'') FROM negocio.version_manifiesto WHERE manifiesto_id='{m}'"));
+        var folio1 = await bd.ConsultarAsync($"SELECT numero_manifiesto FROM negocio.version_manifiesto WHERE manifiesto_id='{m}'");
+        Assert.Matches(@"^\d{3}/" + DateTime.UtcNow.Year + "$", folio1);
         // Segunda orden: completa sus propios pasos y obtiene su propio manifiesto, en otro orden de llegada.
         foreach (var paso in new[] { "planta", "servicio", "cliente" }) Assert.Equal(HttpStatusCode.OK, (await PasoAsync(s, o, 1, paso)).StatusCode);
         Assert.Equal("1", await ManifiestosDeAsync(o.Ordenes[1]));
-        Assert.NotEqual(m, await bd.ConsultarAsync($"SELECT manifiesto_id FROM negocio.orden_manifiesto WHERE orden_derivada_id='{o.Ordenes[1]}'"));
+        var m2 = await bd.ConsultarAsync($"SELECT manifiesto_id FROM negocio.orden_manifiesto WHERE orden_derivada_id='{o.Ordenes[1]}'");
+        Assert.NotEqual(m, m2);
+        // Folio consecutivo: el de la segunda orden es el siguiente al de la primera.
+        var folio2 = await bd.ConsultarAsync($"SELECT numero_manifiesto FROM negocio.version_manifiesto WHERE manifiesto_id='{m2}'");
+        Assert.Equal(int.Parse(folio1[..3]) + 1, int.Parse(folio2[..3]));
+    }
+
+    [Fact]
+    public async Task El_folio_es_consecutivo_por_anio_y_no_desperdicia_numeros_al_revertir()
+    {
+        // Subtransacción revertida: el número no se consume, el siguiente intento recibe el mismo. Año ficticio propio.
+        await bd.SqlComoDuenoAsync($"""
+            DO $$ DECLARE a text; b text; c text; BEGIN
+                BEGIN a := negocio.siguiente_folio('{Org}', '{Suc}', 2098); RAISE EXCEPTION 'revertir' USING ERRCODE = 'P0001';
+                EXCEPTION WHEN SQLSTATE 'P0001' THEN NULL; END;
+                b := negocio.siguiente_folio('{Org}', '{Suc}', 2098);
+                c := negocio.siguiente_folio('{Org}', '{Suc}', 2098);
+                IF b <> '001/2098' OR c <> '002/2098' THEN RAISE EXCEPTION 'Se esperaba 001/2098 y 002/2098, no % y %', b, c; END IF;
+                IF negocio.siguiente_folio('{Org}', '{Suc}', 2099) <> '001/2099' THEN RAISE EXCEPTION 'Cada año reinicia en 001'; END IF;
+            END $$;
+            """);
     }
 
     [Fact]

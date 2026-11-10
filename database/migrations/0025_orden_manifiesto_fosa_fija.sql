@@ -1,19 +1,19 @@
 -- Fosa fija (A6): una ORDEN = un MANIFIESTO = una vuelta completa (usuario, 10-nov-2026). El servidor arma el
 -- manifiesto cuando llegan los pasos de la orden: (1) foto y firma del operador, (2) firma y nombre del cliente
 -- (solo si es cliente autorizado/generador), (3) firma y nombre en la planta. El operador NUNCA ve manifiestos.
--- - Se arma lo que ya definía 0015 (generador, transportista, capacidad estimada). NO asigna folio (cuándo y con
---   qué contador `NNN/AAAA`: pendiente), NO registra destinatario/descarga (catálogo de plantas y relación PG-08
---   pendientes; la planta capturada queda en captura_trabajo) y no se envía por correo.
+-- - Se arma lo que ya definía 0015 (generador, transportista, capacidad estimada) y se asigna el FOLIO `NNN/AAAA`
+--   consecutivo sin huecos al completarse la orden (usuario, 10-nov-2026). NO registra destinatario/descarga
+--   (catálogo de plantas y relación PG-08 pendientes; la planta capturada queda en captura_trabajo) y no se envía por correo.
 -- - Una captura NUNCA se rechaza por no resolver su orden (el plan pudo corregirse después de descargarlo):
 --   se guarda el hecho, se marca para revisión y no se arma manifiesto. La revisión es de A7.
 -- - Solo fosa fija. Sanitarios y fosas propias rentadas siguen con otra lógica (PG-24).
 
 -- Versión interna sin permisos de panel: solo la invoca el disparador de recepción. Sin GRANT para la aplicación.
-CREATE FUNCTION negocio.armar_manifiesto_fosa_fija(o uuid, s uuid, p_cliente uuid, p_vehiculo uuid)
+CREATE FUNCTION negocio.armar_manifiesto_fosa_fija(o uuid, s uuid, p_cliente uuid, p_vehiculo uuid, p_con_folio boolean DEFAULT false)
 RETURNS TABLE (manifiesto uuid, generador_es_cliente boolean)
 LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = pg_catalog AS $$
 DECLARE
-    emp_cli uuid; emp_nuestra uuid; aut_cli uuid; aut_gen uuid; aut_tra uuid; emp_gen uuid;
+    folio text; emp_cli uuid; emp_nuestra uuid; aut_cli uuid; aut_gen uuid; aut_tra uuid; emp_gen uuid;
     ficha_veh uuid; capacidad numeric; ficha_gen uuid; ficha_tra uuid; m uuid; v uuid;
 BEGIN
     SELECT c.empresa_id INTO emp_cli FROM negocio.cliente c WHERE c.organizacion_id = o AND c.sucursal_id = s AND c.id = p_cliente;
@@ -48,8 +48,9 @@ BEGIN
     -- Nuestra empresa participa en la sucursal como generador o transportista.
     INSERT INTO negocio.empresa_sucursal VALUES (o, s, emp_nuestra) ON CONFLICT DO NOTHING;
     INSERT INTO negocio.manifiesto (organizacion_id, sucursal_id, cliente_id) VALUES (o, s, p_cliente) RETURNING id INTO m;
-    INSERT INTO negocio.version_manifiesto (organizacion_id, sucursal_id, manifiesto_id, revision, ficha_vehiculo_id, version_plantilla)
-    VALUES (o, s, m, 1, ficha_veh, 'fosa-fija-1') RETURNING id INTO v;
+    IF p_con_folio THEN folio := negocio.siguiente_folio(o, s, extract(year FROM now() AT TIME ZONE 'UTC')::integer); END IF;
+    INSERT INTO negocio.version_manifiesto (organizacion_id, sucursal_id, manifiesto_id, revision, numero_manifiesto, ficha_vehiculo_id, version_plantilla)
+    VALUES (o, s, m, 1, folio, ficha_veh, 'fosa-fija-1') RETURNING id INTO v;
     INSERT INTO negocio.participante_manifiesto (organizacion_id, sucursal_id, version_id, rol, empresa_id, ficha_empresa_id, autorizacion_id, origen_domicilio)
     VALUES (o, s, v, 'generador', emp_gen, ficha_gen, aut_gen, 'fiscal'),
            (o, s, v, 'transportista', emp_nuestra, ficha_tra, aut_tra, 'fiscal');
@@ -59,7 +60,7 @@ BEGIN
         capacidad, 'm3', 1, capacidad, 'm3', 'estimada', 'capacidad_unidad_llena', '1');
     RETURN QUERY SELECT m, aut_cli IS NOT NULL;
 END $$;
-REVOKE ALL ON FUNCTION negocio.armar_manifiesto_fosa_fija(uuid, uuid, uuid, uuid) FROM PUBLIC;
+REVOKE ALL ON FUNCTION negocio.armar_manifiesto_fosa_fija(uuid, uuid, uuid, uuid, boolean) FROM PUBLIC;
 
 -- La función pública conserva su comportamiento y permisos; ahora delega en la interna.
 CREATE OR REPLACE FUNCTION negocio.generar_manifiesto_fosa_fija(o uuid, s uuid, p_cliente uuid, p_vehiculo uuid)
@@ -74,6 +75,26 @@ BEGIN
     END IF;
     RETURN QUERY SELECT * FROM negocio.armar_manifiesto_fosa_fija(o, s, p_cliente, p_vehiculo);
 END $$;
+
+-- Folio `NNN/AAAA`, consecutivo SIN HUECOS (usuario, 10-nov-2026): se asigna al armar el manifiesto, dentro de la misma
+-- transacción, con la fila del contador bloqueada; si la transacción se revierte, el número no se consume.
+-- Alcance PROVISIONAL: por organización + sucursal + año (UTC); pendiente confirmar alcance y zona horaria (PG-18).
+CREATE TABLE negocio.contador_folio (
+    organizacion_id uuid NOT NULL, sucursal_id uuid NOT NULL,
+    anio integer NOT NULL CHECK (anio BETWEEN 2000 AND 9999), ultimo integer NOT NULL DEFAULT 0 CHECK (ultimo >= 0),
+    PRIMARY KEY (organizacion_id, sucursal_id, anio),
+    FOREIGN KEY (organizacion_id, sucursal_id) REFERENCES negocio.sucursal ON DELETE RESTRICT
+);
+ALTER TABLE negocio.contador_folio ENABLE ROW LEVEL SECURITY;  -- sin política ni GRANT: solo la función definer lo toca
+CREATE FUNCTION negocio.siguiente_folio(o uuid, s uuid, p_anio integer) RETURNS text
+LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path=pg_catalog AS $$
+DECLARE n integer;
+BEGIN
+    INSERT INTO negocio.contador_folio(organizacion_id, sucursal_id, anio) VALUES (o, s, p_anio) ON CONFLICT DO NOTHING;
+    UPDATE negocio.contador_folio SET ultimo = ultimo + 1 WHERE (organizacion_id, sucursal_id, anio) = (o, s, p_anio) RETURNING ultimo INTO n;
+    RETURN lpad(n::text, 3, '0') || '/' || p_anio::text;
+END $$;
+REVOKE ALL ON FUNCTION negocio.siguiente_folio(uuid, uuid, integer) FROM PUBLIC;
 
 CREATE TABLE negocio.orden_manifiesto (
     organizacion_id uuid NOT NULL, sucursal_id uuid NOT NULL, orden_derivada_id uuid NOT NULL,
@@ -166,7 +187,7 @@ BEGIN
     FROM negocio.captura_trabajo t
     WHERE (t.organizacion_id,t.sucursal_id,t.orden_derivada_id)=(NEW.organizacion_id,NEW.sucursal_id,NEW.orden_derivada_id);
     IF serv AND planta AND (cli OR NOT r.autorizado) THEN
-        SELECT g.manifiesto INTO m FROM negocio.armar_manifiesto_fosa_fija(NEW.organizacion_id,NEW.sucursal_id,r.cliente_id,r.vehiculo_id) g;
+        SELECT g.manifiesto INTO m FROM negocio.armar_manifiesto_fosa_fija(NEW.organizacion_id,NEW.sucursal_id,r.cliente_id,r.vehiculo_id,true) g;
         INSERT INTO negocio.orden_manifiesto(organizacion_id,sucursal_id,orden_derivada_id,jornada_id,parada_id,cliente_id,vuelta,vehiculo_id,manifiesto_id)
         VALUES(NEW.organizacion_id,NEW.sucursal_id,NEW.orden_derivada_id,NEW.jornada_id,r.parada_id,r.cliente_id,r.vuelta,r.vehiculo_id,m);
     END IF;
