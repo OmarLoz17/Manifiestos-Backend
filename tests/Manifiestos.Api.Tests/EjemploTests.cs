@@ -86,6 +86,7 @@ public sealed class EjemploTests : IClassFixture<BaseDatosPrueba>, IAsyncLifetim
     public async Task Ordenes_manifiestos_e_incidencias_siguen_las_reglas_confirmadas()
     {
         var ordenes = (await _nav.GetFromJsonAsync<List<RutaDeOrdenes>>("/api/ordenes"))!;
+        Assert.All(ordenes, r => Assert.False(string.IsNullOrWhiteSpace(r.Empresa))); // generador de los clientes generales: nuestra empresa, con su nombre
         var clientes = ordenes.SelectMany(r => r.Paradas).SelectMany(p => p.Clientes).ToList();
         Assert.Contains(clientes, c => c.Banos > 0);
         Assert.Contains(clientes, c => c.Fosas > 0 && !c.FosaPropia);
@@ -93,7 +94,19 @@ public sealed class EjemploTests : IClassFixture<BaseDatosPrueba>, IAsyncLifetim
 
         var manifiestos = (await _nav.GetFromJsonAsync<List<ManifiestoResumen>>("/api/manifiestos"))!;
         Assert.True(manifiestos.Count >= 10);
-        Assert.All(manifiestos, m => Assert.Equal((m.Unidad?.CapacidadM3, "estimada"), (m.Renglones[0].Cantidad, m.Renglones[0].Naturaleza)));
+        Assert.All(manifiestos, m => Assert.NotNull(m.Evidencias)); // fotos y firmas por manifiesto (se ven con /api/archivos/{id})
+        // Fosa fija: unidad llena (capacidad de la unidad, estimada). Sanitarios: capacidad de la unidad (1 m3) estimada, sin cliente (tirada).
+        Assert.All(manifiestos.Where(m => m.Tipo == "fosa_fija"), m => Assert.Equal((m.Unidad?.CapacidadM3, "estimada"), (m.Renglones[0].Cantidad, m.Renglones[0].Naturaleza)));
+        var san = manifiestos.Single(m => m.Tipo == "sanitarios");
+        Assert.Null(san.ClienteId);
+        Assert.Equal("014/2026", san.Folio);
+        Assert.Equal("PTAR NORTE", san.Sanitarios!.Planta);
+        Assert.Equal((66, 1m, "capacidad_unidad_llena"), (san.Sanitarios.TotalBanos, san.Sanitarios.TotalM3Estimado, san.Sanitarios.Metodo));
+        Assert.Equal(3, san.Sanitarios.Paradas.Count);
+        Assert.True(san.Sanitarios.Firmas.Generador.Provisional);
+        Assert.Equal("AR Multiservicios", san.Participantes.Single(p => p.Rol == "generador").Nombre);
+        var ruta410 = (await _nav.GetFromJsonAsync<List<RutaResumen>>("/api/rutas"))!.Single(r => r.Nombre == "ARM-410-LMV");
+        Assert.Equal((50, 0.8m, 80.0m), (ruta410.Carga!.Banos, ruta410.Carga.M3, ruta410.Carga.Porcentaje));
         // Un cliente general lleva a nuestra empresa como generador; uno autorizado, a sí mismo.
         Assert.Contains(manifiestos, m => m.Participantes.Single(p => p.Rol == "generador").Nombre == "AR Multiservicios");
         Assert.Contains(manifiestos, m => m.Participantes.Single(p => p.Rol == "generador").Nombre == m.Cliente);

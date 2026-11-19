@@ -8,7 +8,9 @@ namespace Manifiestos.Api.Incidencias;
 // ---- Respuestas (JSON camelCase) ----
 
 public sealed record Referencia(Guid Id, string Nombre);
-public sealed record ParadaDeIncidencia(Guid Id, int Posicion, string? Sitio);
+/// <summary>Latitud/Longitud = coordenadas del sitio de la parada (última ficha); null si el sitio no las tiene.</summary>
+/// <summary>Parada de la incidencia. Posicion = lugar en el plan; null cuando es una parada EXTRAORDINARIA del día (no tiene posición).</summary>
+public sealed record ParadaDeIncidencia(Guid Id, int? Posicion, string? Sitio, decimal? Latitud = null, decimal? Longitud = null, bool Extraordinaria = false);
 public sealed record UbicacionIncidencia(decimal Latitud, decimal Longitud, decimal? PrecisionM);
 public sealed record SeguimientoIncidencia(int Revision, string Estatus, string? Comentario, DateTimeOffset RegistradoEn);
 
@@ -24,6 +26,8 @@ public interface IRepositorioIncidencias
 {
     Task<IReadOnlyList<IncidenciaResumen>> ListarAsync(Guid organizacion, Guid acceso, CancellationToken ct);
     Task<ResultadoEscritura> SeguirAsync(Guid organizacion, Guid acceso, Guid incidencia, string estatus, string? comentario, int revision, CancellationToken ct);
+    /// <summary>Ruta relativa en el VPS y tipo de la foto de la incidencia; null si no existe o la cuenta no puede verla.</summary>
+    Task<Guid?> ArchivoFotoAsync(Guid organizacion, Guid acceso, Guid incidencia, CancellationToken ct);
 }
 
 /// <summary>
@@ -56,6 +60,8 @@ public sealed class RepositorioIncidencias(NpgsqlDataSource datos) : IRepositori
         await using (var cmd = tx.Comando("""
             SELECT i.id, i.sucursal_id, i.numero, i.servicio, i.motivo, i.descripcion, i.ocurrida_en,
                    i.ruta_id, rv.nombre, i.parada_id, pa.posicion, coalesce(nullif(btrim(fs.nombre), ''), si.referencia),
+                   fs.latitud, fs.longitud,
+                   px.id IS NOT NULL,
                    i.cliente_id, coalesce(nullif(btrim(fe.nombre_comercial), ''), nullif(btrim(fe.nombre_fiscal), ''), nullif(btrim(c.codigo_comercial), ''), 'Cliente sin nombre'),
                    i.vehiculo_id, coalesce(fv.numero_economico, veh.numero_economico),
                    i.persona_id, coalesce(op.nombre_completo, pe.nombre_completo),
@@ -66,16 +72,14 @@ public sealed class RepositorioIncidencias(NpgsqlDataSource datos) : IRepositori
                 WHERE (x.organizacion_id, x.sucursal_id, x.ruta_id) = (i.organizacion_id, i.sucursal_id, i.ruta_id)
                 ORDER BY x.revision DESC LIMIT 1) rv ON true
             LEFT JOIN negocio.parada pa ON (pa.organizacion_id, pa.sucursal_id, pa.id) = (i.organizacion_id, i.sucursal_id, i.parada_id)
+            LEFT JOIN negocio.parada_extraordinaria px ON (px.organizacion_id, px.sucursal_id, px.id) = (i.organizacion_id, i.sucursal_id, i.parada_id)
             LEFT JOIN LATERAL (SELECT x.sitio_id FROM negocio.parada_version x
                 WHERE (x.organizacion_id, x.sucursal_id, x.parada_id) = (pa.organizacion_id, pa.sucursal_id, pa.id)
                 ORDER BY x.revision DESC LIMIT 1) pv ON true
-            LEFT JOIN negocio.sitio si ON (si.organizacion_id, si.sucursal_id, si.id) = (i.organizacion_id, i.sucursal_id, pv.sitio_id)
-            LEFT JOIN LATERAL (SELECT x.nombre FROM negocio.ficha_sitio x
+            LEFT JOIN negocio.sitio si ON (si.organizacion_id, si.sucursal_id, si.id) = (i.organizacion_id, i.sucursal_id, coalesce(pv.sitio_id, px.sitio_id))
+            LEFT JOIN LATERAL (SELECT x.nombre, x.latitud, x.longitud FROM negocio.ficha_sitio x
                 WHERE (x.organizacion_id, x.sucursal_id, x.sitio_id) = (si.organizacion_id, si.sucursal_id, si.id)
                 ORDER BY x.revision DESC LIMIT 1) fs ON true
-            LEFT JOIN LATERAL (SELECT x.fosa_propia FROM negocio.cliente_sitio x
-                WHERE (x.organizacion_id, x.sucursal_id, x.cliente_id, x.sitio_id) = (i.organizacion_id, i.sucursal_id, i.cliente_id, pv.sitio_id)
-                ORDER BY x.revision DESC LIMIT 1) cs ON true
             LEFT JOIN negocio.cliente c ON (c.organizacion_id, c.sucursal_id, c.id) = (i.organizacion_id, i.sucursal_id, i.cliente_id)
             LEFT JOIN LATERAL (SELECT x.nombre_fiscal, x.nombre_comercial FROM negocio.ficha_empresa x
                 WHERE (x.organizacion_id, x.empresa_id) = (c.organizacion_id, c.empresa_id)
@@ -102,14 +106,23 @@ public sealed class RepositorioIncidencias(NpgsqlDataSource datos) : IRepositori
                 lista.Add(new IncidenciaResumen(
                     id, r.GetGuid(1), $"INC-{r.GetInt64(2):000000}", r.GetString(3), r.GetString(4), T(5), Utc(r.GetDateTime(6)),
                     Ref(7, 8, "Ruta sin nombre"),
-                    r.IsDBNull(9) ? null : new ParadaDeIncidencia(r.GetGuid(9), r.GetInt32(10), T(11)),
-                    Ref(12, 13, "Cliente sin nombre"), Ref(14, 15, "Unidad sin número"), Ref(16, 17, "Operador sin nombre"),
-                    r.IsDBNull(18) ? null : r.GetInt32(18), r.IsDBNull(19) ? null : r.GetInt32(19), r.GetBoolean(20),
-                    r.IsDBNull(21) ? null : new UbicacionIncidencia(r.GetDecimal(21), r.GetDecimal(22), r.IsDBNull(23) ? null : r.GetDecimal(23)),
-                    ultimo?.Estatus ?? "abierta", ultimo?.Revision ?? 0, h, r.GetBoolean(24)));
+                    r.IsDBNull(9) ? null : new ParadaDeIncidencia(r.GetGuid(9), r.IsDBNull(10) ? null : r.GetInt32(10), T(11),
+                        r.IsDBNull(12) ? null : r.GetDecimal(12), r.IsDBNull(13) ? null : r.GetDecimal(13), r.GetBoolean(14)),
+                    Ref(15, 16, "Cliente sin nombre"), Ref(17, 18, "Unidad sin número"), Ref(19, 20, "Operador sin nombre"),
+                    r.IsDBNull(21) ? null : r.GetInt32(21), r.IsDBNull(22) ? null : r.GetInt32(22), r.GetBoolean(23),
+                    r.IsDBNull(24) ? null : new UbicacionIncidencia(r.GetDecimal(24), r.GetDecimal(25), r.IsDBNull(26) ? null : r.GetDecimal(26)),
+                    ultimo?.Estatus ?? "abierta", ultimo?.Revision ?? 0, h, r.GetBoolean(27)));
             }
         await tx.ConfirmarAsync(ct);
         return lista;
+    }
+
+    public async Task<Guid?> ArchivoFotoAsync(Guid organizacion, Guid acceso, Guid incidencia, CancellationToken ct)
+    {
+        await using var tx = await TransaccionContexto.AbrirAsync(datos, organizacion, acceso, ct);
+        await using var cmd = tx.Comando("SELECT evidencia_archivo_id FROM negocio.incidencia WHERE organizacion_id = $1 AND id = $2", organizacion, incidencia);
+        var v = await cmd.ExecuteScalarAsync(ct);
+        return v is Guid g ? g : null;
     }
 
     public async Task<ResultadoEscritura> SeguirAsync(Guid organizacion, Guid acceso, Guid incidencia, string estatus, string? comentario, int revision, CancellationToken ct)
@@ -168,6 +181,13 @@ public static class EndpointsIncidencias
             if (!ServiciosAcceso.LeerIds(http.User, out var org, out var acceso)) return Results.Unauthorized();
             http.Response.Headers.CacheControl = "no-store";
             return Results.Ok(await incidencias.ListarAsync(org, acceso, http.RequestAborted));
+        });
+        // La foto se sirve desde el backend a quien tenga acceso a la incidencia: sin enlaces públicos ni acceso a Drive.
+        g.MapGet("/{id:guid}/foto", async (Guid id, HttpContext http, IRepositorioIncidencias incidencias, NpgsqlDataSource datos, IConfiguration config, IWebHostEnvironment entorno, Manifiestos.Api.Archivos.IAlmacenDrive drive) =>
+        {
+            if (!ServiciosAcceso.LeerIds(http.User, out var org, out var acceso)) return Results.Unauthorized();
+            var archivo = await incidencias.ArchivoFotoAsync(org, acceso, id, http.RequestAborted);
+            return archivo is null ? Results.NotFound() : await Manifiestos.Api.Archivos.EndpointsArchivos.ServirAsync(archivo.Value, http, datos, config, entorno, drive);
         });
         g.MapPut("/{id:guid}/seguimiento", SeguirAsync).AddEndpointFilter(EndpointsAcceso.ValidarCsrf);
     }

@@ -17,6 +17,10 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Falló la validación de rutas.' }
     docker compose -f $compose exec -T postgres psql -X -v ON_ERROR_STOP=1 -U manifiestos_owner -d $db -f /workspace/database/tests/clientes.sql
     if ($LASTEXITCODE -ne 0) { throw 'Falló la validación de clientes.' }
+    docker compose -f $compose exec -T postgres psql -X -v ON_ERROR_STOP=1 -U manifiestos_owner -d $db -f /workspace/database/tests/sanitarios_base.sql
+    if ($LASTEXITCODE -ne 0) { throw 'Falló la validación de la base de sanitarios.' }
+    docker compose -f $compose exec -T postgres psql -X -v ON_ERROR_STOP=1 -U manifiestos_owner -d $db -f /workspace/database/tests/sanitarios.sql
+    if ($LASTEXITCODE -ne 0) { throw 'Falló la validación de captura de baños y tirada.' }
     $worker = {
         param($composePath, $databaseName, $file, [string[]]$vars)
         $extra = @(); foreach ($v in $vars) { $extra += @('-v', $v) }

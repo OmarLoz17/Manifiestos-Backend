@@ -1,3 +1,4 @@
+using Microsoft.Extensions.DependencyInjection;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
@@ -254,6 +255,74 @@ public sealed class CapturasMovilTests(BaseDatosPrueba bd) : IClassFixture<BaseD
         Assert.Equal(int.Parse(folio1[..3]) + 1, int.Parse(folio2[..3]));
     }
 
+    [Theory]
+    [InlineData(true)]   // la fosa propia (cliente general) ya no es una orden: viaja como parada de sanitarios (decisión 0033)
+    public async Task Ordenes_muestra_por_orden_si_firmaron_el_transportista_el_cliente_y_agua_y_drenaje(bool autorizado)
+    {
+        var s = await SesionAsync(); var o = await OrdenesAsync(s, fosas: 2, autorizado: autorizado);
+        var correo = $"firmas-{Guid.NewGuid():N}@example.invalid";
+        await bd.AutorizarAsync(correo);
+        var web = _api.NuevoNavegador();
+        Assert.Equal(HttpStatusCode.NoContent, (await web.EntrarAsync(ValidadorFicticio.Token($"s-{correo}", correo))).StatusCode);
+        var ruta = Guid.Parse(await bd.ConsultarAsync($"SELECT ruta_id FROM negocio.jornada WHERE id='{o.Jornada}'"));
+        async Task<(bool Transportista, bool Cliente, bool Agua)[]> FirmasAsync()
+        {
+            var cliente = JsonDocument.Parse(await web.GetStringAsync($"/api/ordenes?fecha={Hoy}")).RootElement.EnumerateArray()
+                .Single(r => r.GetProperty("id").GetGuid() == ruta).GetProperty("paradas")[0].GetProperty("clientes")[0];
+            return cliente.GetProperty("ordenes").EnumerateArray()
+                .Select(x => (x.GetProperty("transportista").GetBoolean(), x.GetProperty("cliente").GetBoolean(), x.GetProperty("aguaYDrenaje").GetBoolean())).ToArray();
+        }
+        // Sin capturas: nada firmado; en un cliente general la firma del cliente es la nuestra y ya viene marcada.
+        Assert.Equal([(false, !autorizado, false), (false, !autorizado, false)], await FirmasAsync());
+        Assert.Equal(HttpStatusCode.OK, (await PasoAsync(s, o, 0, "servicio", requiereCliente: autorizado)).StatusCode);
+        Assert.Equal([(true, !autorizado, false), (false, !autorizado, false)], await FirmasAsync());
+        if (autorizado)
+        {
+            Assert.Equal(HttpStatusCode.OK, (await PasoAsync(s, o, 0, "cliente")).StatusCode);
+            Assert.Equal([(true, true, false), (false, false, false)], await FirmasAsync());
+        }
+        Assert.Equal(HttpStatusCode.OK, (await PasoAsync(s, o, 0, "planta", requiereCliente: autorizado)).StatusCode);
+        Assert.Equal([(true, true, true), (false, !autorizado, false)], await FirmasAsync());
+    }
+
+    [Fact]
+    public async Task Carga_por_tirar_de_fosas_cuenta_ordenes_succionadas_sin_recepcion_en_planta_y_baja_al_descargar()
+    {
+        var s = await SesionAsync(); var o = await OrdenesAsync(s, fosas: 2, autorizado: true);   // fosa fija (convenio): cada orden es un viaje con la unidad llena
+        var correo = $"carga-{Guid.NewGuid():N}@example.invalid";
+        await bd.AutorizarAsync(correo);
+        var web = _api.NuevoNavegador();
+        Assert.Equal(HttpStatusCode.NoContent, (await web.EntrarAsync(ValidadorFicticio.Token($"s-{correo}", correo))).StatusCode);
+        var ruta = Guid.Parse(await bd.ConsultarAsync($"SELECT ruta_id FROM negocio.jornada WHERE id='{o.Jornada}'"));
+        async Task<JsonElement> CargaAsync() =>
+            JsonDocument.Parse(await web.GetStringAsync("/api/rutas")).RootElement.EnumerateArray()
+                .Single(r => r.GetProperty("id").GetGuid() == ruta).GetProperty("cargaFosas");
+
+        // Sin capturas: la unidad (15 m3) viene vacía.
+        var vacia = await CargaAsync();
+        Assert.Equal((0, 0m, 15m, 0m), (vacia.GetProperty("ordenes").GetInt32(), vacia.GetProperty("m3").GetDecimal(), vacia.GetProperty("capacidadM3").GetDecimal(), vacia.GetProperty("porcentaje").GetDecimal()));
+        Assert.Equal(JsonValueKind.Null, vacia.GetProperty("ultimaDescargaEn").ValueKind);
+
+        // Dos órdenes succionadas (llenan la unidad dos veces): 2 x 15 m3 estimados, 200 %, sin importar la fecha de hoy.
+        // Un servicio de una orden inexistente va a revisión y no cuenta; un problema tampoco.
+        foreach (var i in new[] { 0, 1 }) Assert.Equal(HttpStatusCode.OK, (await PasoAsync(s, o, i, "servicio")).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await EnviarAsync(s.Http, Sobre(s, Guid.NewGuid(), "SERVICIO_OPERADOR", orden: Guid.NewGuid(), jornada: o.Jornada))).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await EnviarAsync(s.Http, Sobre(s, Guid.NewGuid(), "SERVICIO_OPERADOR", orden: o.Ordenes[0], jornada: o.Jornada))).StatusCode);   // reenvío con otro UUID: misma orden
+        var llena = await CargaAsync();
+        Assert.Equal((2, 30m, 200m), (llena.GetProperty("ordenes").GetInt32(), llena.GetProperty("m3").GetDecimal(), llena.GetProperty("porcentaje").GetDecimal()));
+        var dia = Assert.Single(llena.GetProperty("desglose").EnumerateArray());
+        Assert.Equal((Hoy, 2), (dia.GetProperty("fecha").GetString(), dia.GetProperty("ordenes").GetInt32()));
+
+        // La descarga en planta de la primera orden la saca de la carga y fija la última descarga.
+        Assert.Equal(HttpStatusCode.OK, (await PasoAsync(s, o, 0, "planta")).StatusCode);
+        var parcial = await CargaAsync();
+        Assert.Equal((1, 15m, 100m), (parcial.GetProperty("ordenes").GetInt32(), parcial.GetProperty("m3").GetDecimal(), parcial.GetProperty("porcentaje").GetDecimal()));
+        Assert.NotEqual(JsonValueKind.Null, parcial.GetProperty("ultimaDescargaEn").ValueKind);
+        Assert.Equal(1, Assert.Single(parcial.GetProperty("desglose").EnumerateArray()).GetProperty("ordenes").GetInt32());
+        Assert.Equal(HttpStatusCode.OK, (await PasoAsync(s, o, 1, "planta")).StatusCode);
+        Assert.Equal(0, (await CargaAsync()).GetProperty("ordenes").GetInt32());
+    }
+
     [Fact]
     public async Task El_folio_es_consecutivo_por_anio_y_no_desperdicia_numeros_al_revertir()
     {
@@ -268,16 +337,6 @@ public sealed class CapturasMovilTests(BaseDatosPrueba bd) : IClassFixture<BaseD
                 IF negocio.siguiente_folio('{Org}', '{Suc}', 2099) <> '001/2099' THEN RAISE EXCEPTION 'Cada año reinicia en 001'; END IF;
             END $$;
             """);
-    }
-
-    [Fact]
-    public async Task Cliente_general_no_pide_firma_del_cliente_y_arma_con_servicio_y_planta()
-    {
-        var s = await SesionAsync(); var o = await OrdenesAsync(s, fosas: 1, autorizado: false);
-        Assert.Equal(HttpStatusCode.OK, (await PasoAsync(s, o, 0, "servicio", requiereCliente: false)).StatusCode);
-        Assert.Equal("0", await ManifiestosDeAsync(o.Ordenes[0]));
-        Assert.Equal(HttpStatusCode.OK, (await PasoAsync(s, o, 0, "planta", requiereCliente: false)).StatusCode);
-        Assert.Equal("1", await ManifiestosDeAsync(o.Ordenes[0]));
     }
 
     [Fact]
@@ -314,10 +373,70 @@ public sealed class CapturasMovilTests(BaseDatosPrueba bd) : IClassFixture<BaseD
     }
 
     [Fact]
+    public async Task Varias_subidas_simultaneas_de_la_misma_evidencia_responden_bien_y_dejan_un_solo_archivo()
+    {
+        var s = await SesionAsync(); var foto = Guid.NewGuid();
+        var bytes = new byte[1_900_000]; new Random(7).NextBytes(bytes); bytes[0] = 0xFF; bytes[1] = 0xD8; bytes[2] = 0xFF;   // grande (bajo el tope): amplía la ventana de la carrera
+        Assert.Equal(HttpStatusCode.OK, (await EnviarAsync(s.Http, Sobre(s, Guid.NewGuid(), evidencias: [FotoReal(foto, bytes)]))).StatusCode);
+        var respuestas = await Task.WhenAll(Enumerable.Range(0, 8).Select(_ => SubirAsync(s.Http, foto, bytes)));
+        Assert.All(respuestas, r => Assert.Equal(HttpStatusCode.OK, r.StatusCode));   // antes, el perdedor de la carrera recibía 500
+        Assert.Equal("1", await bd.ConsultarAsync($"SELECT count(*) FROM negocio.archivo WHERE id='{foto}'"));
+        Assert.Equal("1", await bd.ConsultarAsync($"SELECT count(*) FROM sync.tarea WHERE clave='drive:{foto}'"));
+        var archivos = Directory.GetFiles(_api.RutaArchivos, "*", SearchOption.AllDirectories).Where(a => a.Contains(foto.ToString("N"))).ToArray();
+        Assert.Single(archivos);                       // sin copias parciales sobrantes ni sobrescrituras
+        Assert.Equal(ShaDe(bytes), ShaDe(await File.ReadAllBytesAsync(archivos[0])));
+    }
+
+    [Fact]
+    public async Task Drive_en_segundo_plano_archiva_lo_recibido_reintenta_si_falla_y_no_duplica()
+    {
+        var s = await SesionAsync(); var foto = Guid.NewGuid(); byte[] bytes = [0xFF, 0xD8, 0xFF, 4];
+        Assert.Equal(HttpStatusCode.OK, (await EnviarAsync(s.Http, Sobre(s, Guid.NewGuid(), evidencias: [FotoReal(foto, bytes)]))).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await SubirAsync(s.Http, foto, bytes)).StatusCode);   // el operador ya terminó: no esperó a Drive
+        var proceso = _api.Services.GetRequiredService<Manifiestos.Api.Archivos.ProcesoSubidaDrive>();
+
+        // Drive caído: la evidencia sigue recibida en el VPS, la tarea se reprograma y nada se marca como archivado.
+        _api.Drive.Fallar = true;
+        while (await bd.ConsultarAsync($"SELECT count(*) FROM sync.tarea WHERE clave='drive:{foto}' AND intentos=0") == "1") await proceso.ProcesarUnoAsync(default);
+        Assert.Equal("0", await bd.ConsultarAsync($"SELECT count(*) FROM negocio.ubicacion_archivo WHERE archivo_id='{foto}' AND proveedor='drive'"));
+        Assert.Equal("1", await bd.ConsultarAsync($"SELECT count(*) FROM sync.tarea WHERE clave='drive:{foto}' AND completada_en IS NULL AND disponible_en>now()"));
+
+        // Drive vuelve: se vence la espera y se archiva con su identificador, una sola vez.
+        _api.Drive.Fallar = false;
+        await bd.SqlComoDuenoAsync($"UPDATE sync.tarea SET disponible_en=now()-interval '1 second' WHERE clave='drive:{foto}'");
+        while (await proceso.ProcesarUnoAsync(default)) { }
+        Assert.Equal("drive-" + foto.ToString("N"), await bd.ConsultarAsync($"SELECT clave_externa FROM negocio.ubicacion_archivo WHERE archivo_id='{foto}' AND proveedor='drive'"));
+        Assert.Equal("1", await bd.ConsultarAsync($"SELECT count(*) FROM sync.tarea WHERE clave='drive:{foto}' AND completada_en IS NOT NULL"));
+        Assert.False(await proceso.ProcesarUnoAsync(default));   // nada pendiente: no se vuelve a subir
+        Assert.Single(_api.Drive.Subidos, x => x.Archivo == foto);
+        Assert.True(File.Exists(_api.Drive.Subidos.Single(x => x.Archivo == foto).Ruta));   // la copia del VPS se conserva
+    }
+
+    [Fact]
+    public async Task Rechaza_un_archivo_que_no_es_imagen_aunque_declare_serlo_y_uno_demasiado_grande()
+    {
+        var s = await SesionAsync(); var id = Guid.NewGuid();
+        // El encabezado dice JPEG y el tamaño y la huella coinciden con lo declarado, pero el contenido no es una imagen: se rechaza sin guardar nada.
+        var falsa = Guid.NewGuid(); byte[] texto = System.Text.Encoding.UTF8.GetBytes("<script>alert(1)</script>");
+        // Un PNG declarado como JPEG (y al revés) tampoco pasa: la firma debe corresponder al tipo.
+        var png = Guid.NewGuid(); byte[] bytesPng = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 1];
+        // Más grande que el tope de una foto (2 MB), con firma válida.
+        var grande = Guid.NewGuid(); var enorme = new byte[2_200_000]; new Random(3).NextBytes(enorme); enorme[0] = 0xFF; enorme[1] = 0xD8; enorme[2] = 0xFF;
+        Assert.Equal(HttpStatusCode.OK, (await EnviarAsync(s.Http, Sobre(s, id, evidencias: [FotoReal(falsa, texto), FirmaReal(png, "FIRMA_OPERADOR", bytesPng), FotoReal(grande, enorme)]))).StatusCode);
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, (await SubirAsync(s.Http, falsa, texto)).StatusCode);
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, (await SubirAsync(s.Http, png, bytesPng, "image/jpeg")).StatusCode);
+        Assert.Equal(HttpStatusCode.RequestEntityTooLarge, (await SubirAsync(s.Http, grande, enorme)).StatusCode);
+        Assert.Equal("0", await bd.ConsultarAsync($"SELECT count(*) FROM negocio.archivo WHERE id IN ('{falsa}','{png}','{grande}')"));
+        Assert.Empty(Directory.Exists(_api.RutaArchivos) ? Directory.GetFiles(_api.RutaArchivos, "*", SearchOption.AllDirectories) : []);
+        // La firma PNG correcta sí se acepta con su tipo.
+        Assert.Equal(HttpStatusCode.OK, (await SubirAsync(s.Http, png, bytesPng, "image/png")).StatusCode);
+    }
+
+    [Fact]
     public async Task Sube_el_archivo_verificado_lo_guarda_en_el_vps_encola_drive_y_es_idempotente()
     {
         var s = await SesionAsync(); var foto = Guid.NewGuid(); var firma = Guid.NewGuid();
-        byte[] bytesFoto = [1, 2, 3, 4, 5, 6, 7, 8], bytesFirma = [9, 9, 9];
+        byte[] bytesFoto = [0xFF, 0xD8, 0xFF, 4, 5, 6, 7, 8], bytesFirma = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 9];
         var id = Guid.NewGuid();
         Assert.Equal(HttpStatusCode.OK, (await EnviarAsync(s.Http, Sobre(s, id, evidencias: [FotoReal(foto, bytesFoto), FirmaReal(firma, "FIRMA_OPERADOR", bytesFirma)]))).StatusCode);
 
@@ -346,7 +465,7 @@ public sealed class CapturasMovilTests(BaseDatosPrueba bd) : IClassFixture<BaseD
     [Fact]
     public async Task Otro_operador_no_puede_subir_ni_ver_las_evidencias_ajenas()
     {
-        var a = await SesionAsync(); var b = await SesionAsync(); var foto = Guid.NewGuid(); byte[] bytes = [1, 2, 3];
+        var a = await SesionAsync(); var b = await SesionAsync(); var foto = Guid.NewGuid(); byte[] bytes = [0xFF, 0xD8, 0xFF];
         Assert.Equal(HttpStatusCode.OK, (await EnviarAsync(a.Http, Sobre(a, Guid.NewGuid(), evidencias: [FotoReal(foto, bytes), FirmaReal(Guid.NewGuid(), "FIRMA_OPERADOR", [4])]))).StatusCode);
         Assert.Equal(HttpStatusCode.NotFound, (await SubirAsync(b.Http, foto, bytes)).StatusCode);
         Assert.Equal(HttpStatusCode.NotFound, (await SubirAsync(a.Http, Guid.NewGuid(), bytes)).StatusCode);
@@ -358,7 +477,7 @@ public sealed class CapturasMovilTests(BaseDatosPrueba bd) : IClassFixture<BaseD
     public async Task La_foto_de_un_problema_crea_un_aviso_de_incidencia_una_sola_vez()
     {
         var s = await SesionAsync(); var o = await OrdenesAsync(s, fosas: 1, autorizado: true);
-        var foto = Guid.NewGuid(); byte[] bytes = [7, 7, 7, 7]; var captura = Guid.NewGuid();
+        var foto = Guid.NewGuid(); byte[] bytes = [0xFF, 0xD8, 0xFF, 7]; var captura = Guid.NewGuid();
         var sobre = Sobre(s, captura, "PROBLEMA", evidencias: [FotoReal(foto, bytes)], problema: new { motivo = "cliente_ausente", comentario = "Nadie abrió" },
             orden: o.Ordenes[0], jornada: o.Jornada);
         Assert.Equal(HttpStatusCode.OK, (await EnviarAsync(s.Http, sobre)).StatusCode);
@@ -391,11 +510,11 @@ public sealed class CapturasMovilTests(BaseDatosPrueba bd) : IClassFixture<BaseD
     [Fact]
     public async Task Un_problema_no_cuenta_como_paso_ni_arma_manifiesto()
     {
-        var s = await SesionAsync(); var o = await OrdenesAsync(s, fosas: 1, autorizado: false);
+        var s = await SesionAsync(); var o = await OrdenesAsync(s, fosas: 1, autorizado: true);
         var p = Sobre(s, Guid.NewGuid(), "PROBLEMA", evidencias: [Foto(Guid.NewGuid())], problema: new { motivo = "sin_acceso", comentario = "" },
-            orden: o.Ordenes[0], jornada: o.Jornada, requiereCliente: false);
+            orden: o.Ordenes[0], jornada: o.Jornada);
         Assert.Equal(HttpStatusCode.OK, (await EnviarAsync(s.Http, p)).StatusCode);
-        Assert.Equal(HttpStatusCode.OK, (await PasoAsync(s, o, 0, "planta", requiereCliente: false)).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await PasoAsync(s, o, 0, "planta")).StatusCode);
         Assert.Equal("0", await ManifiestosDeAsync(o.Ordenes[0]));        // falta el servicio: el problema no lo reemplaza
     }
 }

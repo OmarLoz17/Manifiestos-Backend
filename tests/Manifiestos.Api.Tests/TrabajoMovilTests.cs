@@ -87,21 +87,51 @@ public sealed class TrabajoMovilTests(BaseDatosPrueba bd) : IClassFixture<BaseDa
     }
 
     [Fact]
+    public async Task En_una_ruta_con_banos_la_fosa_de_un_cliente_general_viaja_como_parada_de_sanitarios_y_la_de_convenio_sigue_siendo_orden()
+    {
+        var yo = await EquipoAsync();
+        // Un cliente general con baños Y fosa en una ruta de fosas: la ruta es «mixta»; su fosa ya no es una orden, va en la entrada de sanitarios.
+        var (jornada, parada, cliente) = await RutaAsync(yo.Persona, fosas: 1, autorizado: false, "programada", banos: 4);
+        var c = await SesionAsync(yo);
+        var t = await TrabajoAsync(c, Hoy);
+        var jornadas = t.GetProperty("jornadas").EnumerateArray().ToList();
+        Assert.Equal(2, jornadas.Count);
+        var fosas = jornadas.Single(x => x.GetProperty("servicio").GetString() == "fosas");
+        var banos = jornadas.Single(x => x.GetProperty("servicio").GetString() == "sanitarios");
+        Assert.Empty(fosas.GetProperty("paradas").EnumerateArray());                          // sin órdenes de fosa propia
+        Assert.Equal(jornada, banos.GetProperty("jornadaId").GetGuid());                      // la misma jornada real
+        Assert.Equal(jornada + ":sanitarios", banos.GetProperty("claveRuta").GetString());    // identidad propia en el teléfono
+        var p = Assert.Single(banos.GetProperty("paradas").EnumerateArray());
+        Assert.Equal(parada, p.GetProperty("paradaId").GetGuid());
+        Assert.Equal(4, p.GetProperty("banosAsignados").GetInt32());
+        Assert.False(p.GetProperty("fosa").GetBoolean());                                     // tiene baños: se captura con su total
+        // Un cliente con convenio (autorizado) con baños de datos antiguos NO crea la entrada de sanitarios ni deja de ser orden.
+        var otro = await EquipoAsync();
+        await RutaAsync(otro.Persona, fosas: 2, autorizado: true, "programada", banos: 3);
+        var t2 = await TrabajoAsync(await SesionAsync(otro), Hoy);
+        var unico = Assert.Single(t2.GetProperty("jornadas").EnumerateArray());
+        Assert.Equal("fosas", unico.GetProperty("servicio").GetString());
+    }
+
+    [Fact]
     public async Task Entrega_solo_la_jornada_programada_de_hoy_de_su_persona_con_ordenes_derivadas()
     {
         var yo = await EquipoAsync(); var otro = await EquipoAsync();
         var (programada, parada, cliente) = await RutaAsync(yo.Persona, fosas: 2, autorizado: true, "programada", banos: 3);
-        await RutaAsync(yo.Persona, 1, true, "borrador");           // sin publicar: no se ve
-        await RutaAsync(yo.Persona, 1, true, "cancelada");          // cancelada: no se ve
-        await RutaAsync(yo.Persona, 1, true, null);                 // sin jornada: no se ve
-        await RutaAsync(yo.Persona, 1, true, "programada", "2026-01-01"); // otra fecha: no se ve
-        await RutaAsync(otro.Persona, 1, true, "programada");       // de otro operador: no se ve
+        var borrador = (await RutaAsync(yo.Persona, 1, true, "borrador")).Item1;      // fila antigua en borrador: no se ve
+        var cancelada = (await RutaAsync(yo.Persona, 1, true, "cancelada")).Item1;    // cancelada: no se ve
+        await RutaAsync(yo.Persona, 1, true, null);                                    // sin fila: ahora SÍ se ve (programada por omisión, 0049)
+        await RutaAsync(otro.Persona, 1, true, "programada");                          // de otro operador: no se ve
         var c = await SesionAsync(yo);
 
         var t = await TrabajoAsync(c, Hoy);
         var jornadas = t.GetProperty("jornadas").EnumerateArray().ToList();
-        var j = Assert.Single(jornadas);
-        Assert.Equal(programada, j.GetProperty("jornadaId").GetGuid());
+        var ids = jornadas.Select(x => x.GetProperty("jornadaId").GetGuid()).ToList();
+        Assert.Contains(programada, ids);
+        Assert.DoesNotContain(borrador, ids);
+        Assert.DoesNotContain(cancelada, ids);
+        Assert.All(jornadas, x => Assert.Equal("programada", x.GetProperty("estado").GetString()));
+        var j = jornadas.Single(x => x.GetProperty("jornadaId").GetGuid() == programada);
         Assert.Equal("programada", j.GetProperty("estado").GetString());
         Assert.Equal(1, j.GetProperty("unidad").GetProperty("capacidadM3").GetDecimal() > 0 ? 1 : 0);
         var p = Assert.Single(j.GetProperty("paradas").EnumerateArray());
@@ -130,9 +160,13 @@ public sealed class TrabajoMovilTests(BaseDatosPrueba bd) : IClassFixture<BaseDa
         var yo = await EquipoAsync();
         await RutaAsync(yo.Persona, fosas: 1, autorizado: false, "programada");
         var t = await TrabajoAsync(await SesionAsync(yo), Hoy);
-        var k = t.GetProperty("jornadas")[0].GetProperty("paradas")[0].GetProperty("clientes")[0];
-        Assert.False(k.GetProperty("autorizado").GetBoolean());
-        Assert.True(k.GetProperty("fosaPropia").GetBoolean());
+        // Decisión 0033: la fosa propia (cliente general) SIEMPRE viaja como parada de sanitarios (un baño muy grande: foto con ubicación, sin cantidad).
+        var jornadas = t.GetProperty("jornadas").EnumerateArray().ToList();
+        Assert.Empty(jornadas.Single(x => x.GetProperty("servicio").GetString() == "fosas").GetProperty("paradas").EnumerateArray());   // sin órdenes de fosa
+        var j = jornadas.Single(x => x.GetProperty("servicio").GetString() == "sanitarios");
+        var p = Assert.Single(j.GetProperty("paradas").EnumerateArray());
+        Assert.True(p.GetProperty("fosa").GetBoolean());
+        Assert.False(p.GetProperty("clientes")[0].GetProperty("autorizado").GetBoolean());
     }
 
     [Fact]

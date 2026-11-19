@@ -17,8 +17,8 @@ public static class SitiosCliente
                      JOIN LATERAL (SELECT pv.id,pv.sitio_id FROM negocio.parada_version pv
                        WHERE (pv.organizacion_id,pv.sucursal_id,pv.parada_id)=(p.organizacion_id,p.sucursal_id,p.id)
                        ORDER BY pv.revision DESC LIMIT 1) v ON v.sitio_id=cs.sitio_id
-                     JOIN negocio.parada_cliente pc ON (pc.organizacion_id,pc.sucursal_id,pc.version_id)=(p.organizacion_id,p.sucursal_id,v.id)
-                     WHERE p.organizacion_id=cs.organizacion_id AND p.sucursal_id=cs.sucursal_id AND pc.cliente_id=cs.cliente_id),
+                     WHERE p.organizacion_id=cs.organizacion_id AND p.sucursal_id=cs.sucursal_id
+                       AND NOT EXISTS(SELECT 1 FROM negocio.parada_baja pb WHERE (pb.organizacion_id,pb.sucursal_id,pb.parada_id)=(p.organizacion_id,p.sucursal_id,p.id))),
                    cs.fosa_propia, f.latitud, f.longitud
             FROM (SELECT DISTINCT ON (organizacion_id,sucursal_id,cliente_id,sitio_id) *
                   FROM negocio.cliente_sitio WHERE organizacion_id=$1

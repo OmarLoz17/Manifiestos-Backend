@@ -101,18 +101,21 @@ SELECT 'de000000-0000-4000-8000-000000000001', pg_temp.uid('persona:' || clave),
 FROM (VALUES ('p1', 'Andrés Ficticio Garza'), ('p2', 'Beatriz Ficticia Treviño'), ('p3', 'Carlos Ficticio Salinas'),
              ('p4', 'Diana Ficticia Cantú'), ('p5', 'Ernesto Ficticio Villarreal'), ('p6', 'Fernanda Ficticia Leal')) AS t(clave, nombre);
 
--- Capacidades del catálogo confirmado: 1 = 10 m³, 2 = 15 m³, 3 = 18 m³.
-CREATE TEMP TABLE demo_unidad (clave text, economico text, capacidad smallint, placas text, operador text);
+-- Capacidades del catálogo confirmado: 1 = 10 m³, 2 = 15 m³, 3 = 18 m³ (fosas) y 4 = 1 m³ (sanitarios). Toda unidad lleva su
+-- clasificación: sin ella no puede elegirse para una ruta (el modal de ruta solo ofrece unidades del servicio de la pestaña).
+CREATE TEMP TABLE demo_unidad (clave text, economico text, capacidad smallint, placas text, operador text, clasificacion text);
 INSERT INTO demo_unidad VALUES
-    ('u1', 'U-101', 1, 'DEMO-101', 'p1'),
-    ('u2', 'U-102', 2, 'DEMO-102', 'p2'),
-    ('u3', 'U-103', 3, 'DEMO-103', 'p3'),
-    ('u4', 'U-104', 2, 'DEMO-104', 'p4');
+    ('u1', 'U-101', 1, 'DEMO-101', 'p1', 'fosas'),
+    ('u2', 'U-102', 2, 'DEMO-102', 'p2', 'fosas'),
+    ('u3', 'U-103', 3, 'DEMO-103', 'p3', 'fosas'),
+    ('u4', 'U-104', 2, 'DEMO-104', 'p4', 'fosas'),
+    ('u5', 'U-105', 4, 'DEMO-105', 'p5', 'sanitarios'),
+    ('u6', 'U-106', 4, 'DEMO-106', 'p6', 'sanitarios');
 INSERT INTO negocio.vehiculo (organizacion_id, sucursal_id, id, numero_economico)
 SELECT 'de000000-0000-4000-8000-000000000001', 'de000000-0000-4000-8000-000000000003', pg_temp.uid('unidad:' || clave), economico FROM demo_unidad;
-INSERT INTO negocio.ficha_vehiculo (organizacion_id, sucursal_id, vehiculo_id, revision, capacidad_id, marca, tipo, placas)
+INSERT INTO negocio.ficha_vehiculo (organizacion_id, sucursal_id, vehiculo_id, revision, capacidad_id, marca, tipo, placas, clasificacion)
 SELECT 'de000000-0000-4000-8000-000000000001', 'de000000-0000-4000-8000-000000000003', pg_temp.uid('unidad:' || clave), 1,
-    capacidad, 'Marca Demo', 'Pipa de vacío', placas FROM demo_unidad;
+    capacidad, 'Marca Demo', CASE clasificacion WHEN 'sanitarios' THEN 'Camión de baños portátiles' ELSE 'Pipa de vacío' END, placas, clasificacion FROM demo_unidad;
 INSERT INTO negocio.asignacion_unidad (organizacion_id, sucursal_id, vehiculo_id, revision, persona_id)
 SELECT 'de000000-0000-4000-8000-000000000001', 'de000000-0000-4000-8000-000000000003', pg_temp.uid('unidad:' || clave), 1,
     pg_temp.uid('persona:' || operador) FROM demo_unidad;
@@ -126,6 +129,15 @@ INSERT INTO negocio.ficha_sitio (organizacion_id, sucursal_id, sitio_id, revisio
 VALUES ('de000000-0000-4000-8000-000000000001', 'de000000-0000-4000-8000-000000000003', pg_temp.uid('sitio:ptar'), 1,
     'PTAR Demo Norte (ficticia)', 'México', 'Nuevo León', 'Apodaca', '66600', 'Camino Ficticio a la Planta', 's/n',
     'Zona Industrial Demo', 'Sitio de descarga ficticio');
+
+-- Las dos plantas tratadoras (sitios de descarga, SIN punto de servicio). Solo el nombre: los datos legales no se inventan (PG-08).
+-- La PTAR demo anterior se conserva porque los manifiestos demo y las pruebas E2E del panel la usan.
+INSERT INTO negocio.sitio (organizacion_id, sucursal_id, id, referencia) VALUES
+    ('de000000-0000-4000-8000-000000000001', 'de000000-0000-4000-8000-000000000003', pg_temp.uid('sitio:ptar-norte'), 'PTAR NORTE'),
+    ('de000000-0000-4000-8000-000000000001', 'de000000-0000-4000-8000-000000000003', pg_temp.uid('sitio:ptar-dulces-nombres'), 'PTAR DULCES NOMBRES');
+INSERT INTO negocio.ficha_sitio (organizacion_id, sucursal_id, sitio_id, revision, nombre) VALUES
+    ('de000000-0000-4000-8000-000000000001', 'de000000-0000-4000-8000-000000000003', pg_temp.uid('sitio:ptar-norte'), 1, 'PTAR NORTE'),
+    ('de000000-0000-4000-8000-000000000001', 'de000000-0000-4000-8000-000000000003', pg_temp.uid('sitio:ptar-dulces-nombres'), 1, 'PTAR DULCES NOMBRES');
 
 CREATE TEMP TABLE demo_punto (clave text, nombre text, calle text, numero text, colonia text, cp text, municipio text, referencia text);
 INSERT INTO demo_punto VALUES
@@ -193,7 +205,9 @@ CREATE TEMP TABLE demo_fosa (ruta text, posicion int, cliente text, fosas int);
 INSERT INTO demo_fosa VALUES ('r4', 1, 'g2', 1), ('r4', 2, 'a3', 2), ('r4', 3, 'a4', 1), ('r1', 3, 'a3', 1);
 INSERT INTO negocio.parada_cliente (organizacion_id, sucursal_id, version_id, cliente_id, banos_planeados, fosas_planeadas)
 SELECT 'de000000-0000-4000-8000-000000000001', 'de000000-0000-4000-8000-000000000003',
-    pg_temp.uid('parada-version:' || p.ruta || ':' || p.posicion), pg_temp.uid('cliente:' || p.cliente), p.banos, f.fosas
+    pg_temp.uid('parada-version:' || p.ruta || ':' || p.posicion), pg_temp.uid('cliente:' || p.cliente),
+    CASE WHEN p.cliente LIKE 'a%' THEN NULL ELSE p.banos END,                       -- los autorizados (a*) solo llevan fosas
+    CASE WHEN p.cliente LIKE 'a%' THEN coalesce(f.fosas, p.banos) ELSE f.fosas END
 FROM demo_parada p LEFT JOIN demo_fosa f ON (f.ruta, f.posicion, f.cliente) = (p.ruta, p.posicion, p.cliente);
 DROP TABLE demo_fosa;
 
@@ -284,6 +298,11 @@ INSERT INTO negocio.seguimiento_incidencia (organizacion_id, sucursal_id, incide
     ('de000000-0000-4000-8000-000000000001', 'de000000-0000-4000-8000-000000000003', pg_temp.uid('incidencia:i2'), 2, 'en_proceso', 'Unidad enviada a taller.'),
     ('de000000-0000-4000-8000-000000000001', 'de000000-0000-4000-8000-000000000003', pg_temp.uid('incidencia:i3'), 2, 'cerrada', 'Se atendió al día siguiente.');
 DROP TABLE demo_incidencia;
+
+-- Firma del generador precargada: MARCADOR PROVISIONAL sin archivo (una raya); la firma real la entrega el usuario fuera del repositorio.
+INSERT INTO negocio.firma_generador_precargada (organizacion_id, sucursal_id, empresa_id, revision, nombre_firmante, cargo, es_provisional)
+SELECT s.organizacion_id, s.id, s.empresa_id, 1, 'Gerente (PROVISIONAL)', 'Gerente', true
+FROM negocio.sucursal s WHERE s.id = 'de000000-0000-4000-8000-000000000003';
 
 DROP TABLE demo_cliente, demo_unidad, demo_punto, demo_parada;
 COMMIT;

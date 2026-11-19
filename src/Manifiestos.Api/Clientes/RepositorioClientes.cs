@@ -24,6 +24,7 @@ public sealed class RepositorioClientes(NpgsqlDataSource datos) : IRepositorioCl
     public const string MensajeClienteModificado = "Alguien más modificó este cliente. Recarga para ver los cambios.";
     public const string MensajeQuitarAutorizacion = "No se puede quitar la autorización de un cliente desde aquí.";
     public const string MensajeSinNombre = "Escribe el nombre fiscal o el nombre comercial del cliente.";
+    public const string MensajeSoloAutorizados = "Solo los clientes autorizados tienen direcciones propias; los generales van en los sitios normales.";
     public const string MensajeSinFicha = "Este cliente no tiene ficha de datos registrada; todavía no se puede corregir desde aquí.";
 
     // Cliente autorizado: su empresa tiene autorización de medio ambiente como generador (la última registrada).
@@ -50,7 +51,7 @@ public sealed class RepositorioClientes(NpgsqlDataSource datos) : IRepositorioCl
             JOIN LATERAL (SELECT x.nombre FROM negocio.ruta_version x
                 WHERE (x.organizacion_id, x.sucursal_id, x.ruta_id) = (pa.organizacion_id, pa.sucursal_id, pa.ruta_id)
                 ORDER BY x.revision DESC LIMIT 1) rv ON true
-            WHERE pa.organizacion_id = $1
+            WHERE pa.organizacion_id = $1 AND NOT EXISTS (SELECT 1 FROM negocio.parada_baja pb WHERE (pb.organizacion_id, pb.sucursal_id, pb.parada_id) = (pa.organizacion_id, pa.sucursal_id, pa.id))
             ORDER BY rv.nombre, pa.posicion, pa.id
             """, organizacion))
         await using (var r = await cmd.ExecuteReaderAsync(ct))
@@ -90,7 +91,9 @@ public sealed class RepositorioClientes(NpgsqlDataSource datos) : IRepositorioCl
                 lista.Add(new ClienteResumen(
                     r.GetGuid(0), r.GetGuid(1), r.GetInt32(2), r.GetString(3),
                     T(4), T(5), T(6), T(7), T(8), T(9), T(10), T(11), T(12), T(13), T(14), T(15),
-                    propias, propias.Sum(a => a.Banos ?? 0), propias.Sum(a => a.Fosas ?? 0), sitios.GetValueOrDefault((r.GetGuid(1), r.GetGuid(0))) ?? []));
+                    propias, propias.Sum(a => a.Banos ?? 0), propias.Sum(a => a.Fosas ?? 0),
+                    // Solo los autorizados tienen direcciones propias; los generales van en sitios normales (pestaña Sitios).
+                    T(15) is null ? [] : sitios.GetValueOrDefault((r.GetGuid(1), r.GetGuid(0))) ?? []));
             }
         }
         await tx.ConfirmarAsync(ct);
@@ -110,6 +113,12 @@ public sealed class RepositorioClientes(NpgsqlDataSource datos) : IRepositorioCl
         }
         await using(var permiso=tx.Comando("SELECT seguridad.puede($1,$2,'datos.escribir')",organizacion,sucursal))
             if(await permiso.ExecuteScalarAsync(ct) is not true)return ResultadoEscritura.SinPermiso;
+        await using(var autorizado=tx.Comando("""
+            SELECT EXISTS (SELECT 1 FROM negocio.cliente c JOIN negocio.autorizacion_empresa a
+                ON (a.organizacion_id,a.empresa_id)=(c.organizacion_id,c.empresa_id) AND a.autoridad=$3 AND a.finalidad=$4
+                WHERE c.organizacion_id=$1 AND c.id=$2)
+            """,organizacion,cliente,Autoridad,Finalidad))
+            if(await autorizado.ExecuteScalarAsync(ct) is not true)return ResultadoEscritura.Invalida(MensajeSoloAutorizados);
         try
         {
             if(await SitiosCliente.GuardarAsync(tx,organizacion,sucursal,cliente,sitios,ct) is {} error)return error;
@@ -122,6 +131,7 @@ public sealed class RepositorioClientes(NpgsqlDataSource datos) : IRepositorioCl
     public async Task<ResultadoEscritura> CrearAsync(Guid organizacion, Guid acceso, Guid sucursal, DatosCliente d, CancellationToken ct)
     {
         await using var tx = await TransaccionContexto.AbrirAsync(datos, organizacion, acceso, ct);
+        if (d.Sitios is { Length: > 0 } && Normalizar(d.Autorizacion) is null) return ResultadoEscritura.Invalida(MensajeSoloAutorizados);
         try
         {
             Guid id;
@@ -192,6 +202,8 @@ public sealed class RepositorioClientes(NpgsqlDataSource datos) : IRepositorioCl
                                                 $11::text, $12::text, $13::text, $14::text, $15::text, $16::text)
                 """, [organizacion, sucursal, cliente, revision, .. Parametros(d)]))
                 nueva = (int)(await cmd.ExecuteScalarAsync(ct))!;
+            // Solo los autorizados tienen direcciones propias: la autorización puede venir en esta misma solicitud.
+            if (d.Sitios is { Length: > 0 } && Normalizar(d.Autorizacion) is null) return ResultadoEscritura.Invalida(MensajeSoloAutorizados);
             if (await SitiosCliente.GuardarAsync(tx, organizacion, sucursal, cliente, d.Sitios, ct) is {} errorSitios) return errorSitios;
             await tx.ConfirmarAsync(ct);
             return ResultadoEscritura.Correcta(cliente, nueva);

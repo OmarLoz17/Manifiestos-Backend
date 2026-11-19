@@ -19,6 +19,10 @@ public static class ServiciosAcceso
     public const string ClaimAcceso = "manifiestos:acceso";
     public const string ClaimOrganizacion = "manifiestos:organizacion";
     public const string PoliticaLogin = "login";
+    /// <summary>Renovar sesión móvil: el refresh token es secreto y no adivinable, así que no hace falta frenarlo como a un login; el límite solo protege la base.</summary>
+    public const string PoliticaRenovar = "renovar";
+    /// <summary>Página pública de validación del QR (sin sesión): frena el sondeo de códigos por dirección IP.</summary>
+    public const string PoliticaValidacion = "validacion";
     public const string CabeceraCsrf = "X-CSRF-TOKEN";
     internal const string ItemSesion = "manifiestos:sesion";
 
@@ -90,6 +94,17 @@ public static class ServiciosAcceso
         services.AddRateLimiter(o =>
         {
             o.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+            // Un operador en campo renueva varias veces por minuto (envío, descarga, avisos) y muchos teléfonos pueden salir por la misma IP (red móvil, túnel): por eso es holgado.
+            o.AddPolicy(PoliticaRenovar, http =>
+            {
+                var limite = http.RequestServices.GetRequiredService<IOptions<OpcionesAcceso>>().Value.RenovacionesPorMinuto;
+                return RateLimitPartition.GetFixedWindowLimiter(
+                    http.Connection.RemoteIpAddress?.ToString() ?? "sin-ip",
+                    _ => new FixedWindowRateLimiterOptions { PermitLimit = limite, Window = TimeSpan.FromMinutes(1) });
+            });
+            o.AddPolicy(PoliticaValidacion, http => RateLimitPartition.GetFixedWindowLimiter(
+                http.Connection.RemoteIpAddress?.ToString() ?? "sin-ip",
+                _ => new FixedWindowRateLimiterOptions { PermitLimit = 30, Window = TimeSpan.FromMinutes(1) }));
             o.AddPolicy(PoliticaLogin, http =>
             {
                 var limite = http.RequestServices.GetRequiredService<IOptions<OpcionesAcceso>>().Value.IntentosPorMinuto;

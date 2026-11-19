@@ -33,8 +33,8 @@ INSERT INTO negocio.empresa_sucursal VALUES (pg_temp.uid('o'),pg_temp.uid('s'),p
 INSERT INTO negocio.cliente VALUES (pg_temp.uid('o'),pg_temp.uid('s'),pg_temp.uid('c'),pg_temp.uid('ec'),'C1'),
  (pg_temp.uid('o'),pg_temp.uid('s2'),pg_temp.uid('c2'),pg_temp.uid('ec'),'C2');
 INSERT INTO negocio.vehiculo VALUES (pg_temp.uid('o'),pg_temp.uid('s'),pg_temp.uid('v'),'U-01'),(pg_temp.uid('o'),pg_temp.uid('s2'),pg_temp.uid('v2'),'U-02');
-INSERT INTO negocio.sitio VALUES (pg_temp.uid('o'),pg_temp.uid('s'),pg_temp.uid('obra'),'Obra'),(pg_temp.uid('o'),pg_temp.uid('s'),pg_temp.uid('ptar'),'PTAR');
-INSERT INTO negocio.punto_servicio(organizacion_id,sucursal_id,sitio_id) VALUES (pg_temp.uid('o'),pg_temp.uid('s'),pg_temp.uid('obra'));
+INSERT INTO negocio.sitio VALUES (pg_temp.uid('o'),pg_temp.uid('s'),pg_temp.uid('obra'),'Obra'),(pg_temp.uid('o'),pg_temp.uid('s'),pg_temp.uid('obra2'),'Obra 2'),(pg_temp.uid('o'),pg_temp.uid('s'),pg_temp.uid('ptar'),'PTAR');
+INSERT INTO negocio.punto_servicio(organizacion_id,sucursal_id,sitio_id) VALUES (pg_temp.uid('o'),pg_temp.uid('s'),pg_temp.uid('obra')),(pg_temp.uid('o'),pg_temp.uid('s'),pg_temp.uid('obra2'));
 INSERT INTO seguridad.persona VALUES (pg_temp.uid('o'),pg_temp.uid('p'),'Operador ficticio'),(pg_temp.uid('o2'),pg_temp.uid('px'),'Persona de otro grupo');
 INSERT INTO seguridad.acceso_autorizado(organizacion_id,id,correo_permitido,activo,rol_codigo) VALUES
  (pg_temp.uid('o'),pg_temp.uid('esc'),'escribe@example.invalid',true,'operaciones'),
@@ -59,7 +59,7 @@ INSERT INTO negocio.parada(organizacion_id,sucursal_id,id,ruta_id,posicion) VALU
  (pg_temp.uid('o'),pg_temp.uid('s'),pg_temp.uid('pa1'),pg_temp.uid('r'),1),(pg_temp.uid('o'),pg_temp.uid('s'),pg_temp.uid('pa2'),pg_temp.uid('r'),2);
 INSERT INTO negocio.parada_version(organizacion_id,sucursal_id,id,parada_id,revision,sitio_id) VALUES
  (pg_temp.uid('o'),pg_temp.uid('s'),pg_temp.uid('pv1'),pg_temp.uid('pa1'),1,pg_temp.uid('obra')),
- (pg_temp.uid('o'),pg_temp.uid('s'),pg_temp.uid('pv2'),pg_temp.uid('pa2'),1,pg_temp.uid('obra'));
+ (pg_temp.uid('o'),pg_temp.uid('s'),pg_temp.uid('pv2'),pg_temp.uid('pa2'),1,pg_temp.uid('obra2'));
 INSERT INTO negocio.parada_cliente VALUES
  (pg_temp.uid('o'),pg_temp.uid('s'),pg_temp.uid('pv1'),pg_temp.uid('c'),15),
  (pg_temp.uid('o'),pg_temp.uid('s'),pg_temp.uid('pv2'),pg_temp.uid('c'),10);
@@ -74,7 +74,7 @@ SELECT pg_temp.contexto('esc');
 SELECT pg_temp.afirmar((SELECT posicion FROM negocio.parada WHERE id=pg_temp.uid('pa2'))=1,'reordenar intercambia posiciones');
 SELECT pg_temp.rechaza($q$INSERT INTO negocio.parada_version(organizacion_id,sucursal_id,parada_id,revision,sitio_id) VALUES (pg_temp.uid('o'),pg_temp.uid('s'),pg_temp.uid('pa1'),2,pg_temp.uid('ptar'))$q$,'23503','una PTAR no puede ser parada');
 -- Revisión nueva de una parada (corrección de baños) con sus clientes en la misma transacción.
-INSERT INTO negocio.parada_version(organizacion_id,sucursal_id,id,parada_id,revision,sitio_id) VALUES (pg_temp.uid('o'),pg_temp.uid('s'),pg_temp.uid('pv2b'),pg_temp.uid('pa2'),2,pg_temp.uid('obra'));
+INSERT INTO negocio.parada_version(organizacion_id,sucursal_id,id,parada_id,revision,sitio_id) VALUES (pg_temp.uid('o'),pg_temp.uid('s'),pg_temp.uid('pv2b'),pg_temp.uid('pa2'),2,pg_temp.uid('obra2'));
 INSERT INTO negocio.parada_cliente VALUES (pg_temp.uid('o'),pg_temp.uid('s'),pg_temp.uid('pv2b'),pg_temp.uid('c'),20);
 SELECT pg_temp.rechaza($q$INSERT INTO negocio.parada_cliente VALUES (pg_temp.uid('o'),pg_temp.uid('s'),pg_temp.uid('pv2b'),pg_temp.uid('c'),5)$q$,'23505','cliente repetido en la misma revisión');
 SELECT pg_temp.rechaza($q$INSERT INTO negocio.parada_cliente VALUES (pg_temp.uid('o'),pg_temp.uid('s'),pg_temp.uid('pv1'),gen_random_uuid(),5)$q$,'23514','no se agregan clientes a una revisión ya confirmada');
@@ -95,7 +95,7 @@ SET LOCAL ROLE manifiestos_app;
 SELECT pg_temp.contexto('esc');
 SELECT pg_temp.rechaza_al_confirmar($q$INSERT INTO negocio.ruta(organizacion_id,sucursal_id) VALUES (pg_temp.uid('o'),pg_temp.uid('s'))$q$,'23514','ruta sin revisión');
 SELECT pg_temp.rechaza_al_confirmar($q$INSERT INTO negocio.parada(organizacion_id,sucursal_id,ruta_id,posicion) VALUES (pg_temp.uid('o'),pg_temp.uid('s'),pg_temp.uid('r'),3)$q$,'23514','parada sin revisión');
-SELECT pg_temp.rechaza_al_confirmar($q$INSERT INTO negocio.parada_version(organizacion_id,sucursal_id,parada_id,revision,sitio_id) VALUES (pg_temp.uid('o'),pg_temp.uid('s'),pg_temp.uid('pa1'),2,pg_temp.uid('obra'))$q$,'23514','revisión de parada sin clientes');
+-- 0029: la parada es el sitio; una revisión sin clientes es válida en cualquier servicio (se probó antes como rechazo).
 SELECT pg_temp.rechaza_al_confirmar($q$UPDATE negocio.parada SET posicion=1 WHERE id=pg_temp.uid('pa1')$q$,'23505','dos paradas en la misma posición');
 COMMIT;
 

@@ -17,6 +17,8 @@ public sealed record ContextoOperador(Guid AccesoId, Guid SucursalId, Guid Perso
     Guid IdentidadId, Guid InstalacionId, Guid AsignacionEquipoId, int RevisionEquipo);
 public sealed record UsuarioMovil(Guid OrganizacionId, ContextoOperador Operador, string Rol = "telefono_operador");
 
+public sealed record SolicitudTokenAviso(string? Token);
+
 public sealed class RepositorioAccesoMovil(NpgsqlDataSource datos)
 {
     public async Task<string> RenovarAsync(Guid org, Guid sesion, CancellationToken ct)
@@ -25,13 +27,33 @@ public sealed class RepositorioAccesoMovil(NpgsqlDataSource datos)
         cmd.Parameters.AddWithValue(org); cmd.Parameters.AddWithValue(sesion);
         return (string)(await cmd.ExecuteScalarAsync(ct))!;
     }
+    /// <summary>Guarda el token de avisos push (FCM) de esta instalación. False = sin contexto vigente. Ver migración 0037.</summary>
+    public async Task<bool> RegistrarTokenPushAsync(Guid org, Guid acceso, Guid instalacion, string token, CancellationToken ct)
+    {
+        await using var cmd = datos.CreateCommand("SELECT seguridad.registrar_token_push($1,$2,$3,$4)");
+        cmd.Parameters.AddWithValue(org); cmd.Parameters.AddWithValue(acceso); cmd.Parameters.AddWithValue(instalacion); cmd.Parameters.AddWithValue(token);
+        return (bool)(await cmd.ExecuteScalarAsync(ct))!;
+    }
     /// <summary>Trabajo del día del operador autenticado (JSON ya armado en la base, solo lectura). Null = sin contexto vigente.</summary>
     public async Task<string?> TrabajoAsync(Guid org, Guid acceso, Guid instalacion, DateOnly fecha, CancellationToken ct)
     {
+        // Las rutas fijas están programadas por omisión: se crea la jornada del día de las que salen hoy y aún no tienen fila (migración 0049).
+        await using (var asegurar = datos.CreateCommand("SELECT seguridad.asegurar_jornadas_del_dia($1,$2,$3,$4)"))
+        {
+            asegurar.Parameters.AddWithValue(org); asegurar.Parameters.AddWithValue(acceso); asegurar.Parameters.AddWithValue(instalacion); asegurar.Parameters.AddWithValue(fecha);
+            await asegurar.ExecuteNonQueryAsync(ct);
+        }
         await using var cmd = datos.CreateCommand("SELECT seguridad.trabajo_operador($1,$2,$3,$4)::text");
         cmd.Parameters.AddWithValue(org); cmd.Parameters.AddWithValue(acceso); cmd.Parameters.AddWithValue(instalacion);
         cmd.Parameters.AddWithValue(fecha);
         return await cmd.ExecuteScalarAsync(ct) as string;
+    }
+    /// <summary>Estado de «Terminar parada» enviado por el teléfono ({"paradas":[{jornadaId,paradaId,terminada}]}); solo registra cambios. Migración 0056.</summary>
+    public async Task<int> RegistrarParadasTerminadasAsync(Guid org, Guid acceso, Guid instalacion, string json, CancellationToken ct)
+    {
+        await using var cmd = datos.CreateCommand("SELECT seguridad.registrar_paradas_terminadas($1,$2,$3,$4::jsonb)");
+        cmd.Parameters.AddWithValue(org); cmd.Parameters.AddWithValue(acceso); cmd.Parameters.AddWithValue(instalacion); cmd.Parameters.AddWithValue(json);
+        return (int)(await cmd.ExecuteScalarAsync(ct))!;
     }
     /// <summary>Registra una captura (hecho recibido) con el sobre EXACTO; idempotente por (instalación, id). Ver migración 0024.</summary>
     public async Task<string> RecibirCapturaAsync(Guid org, Guid acceso, Guid instalacion, byte[] solicitud, CancellationToken ct)
@@ -152,9 +174,15 @@ public static class AccesoMovil
             var resultado=await repo.RenovarAsync(org,sesion,http.RequestAborted);
             return resultado=="renovada" ? Emitir(org,sesion)
                 : resultado=="caducada" ? Results.Unauthorized() : Rechazo();
-        }).AllowAnonymous().RequireRateLimiting(ServiciosAcceso.PoliticaLogin);
+        }).AllowAnonymous().RequireRateLimiting(ServiciosAcceso.PoliticaRenovar);
         g.MapGet("/me", (HttpContext http,IOptions<OpcionesAcceso> opciones) =>
             Results.Ok(new UsuarioMovil(opciones.Value.OrganizacionId,(ContextoOperador)http.Items[ItemContexto]!))).RequireAuthorization(Politica);
+        g.MapPost("/token-aviso", async (SolicitudTokenAviso s,HttpContext http,RepositorioAccesoMovil repo,IOptions<OpcionesAcceso> opciones) => {
+            var token=s.Token?.Trim();
+            if (token is null || token.Length is < 20 or > 4096) return Results.BadRequest(new MensajeError("Token de aviso inválido."));
+            var c=(ContextoOperador)http.Items[ItemContexto]!;
+            return await repo.RegistrarTokenPushAsync(opciones.Value.OrganizacionId,c.AccesoId,c.InstalacionId,token,http.RequestAborted) ? Results.NoContent() : Rechazo();
+        }).RequireAuthorization(Politica);
         g.MapPost("/logout", async (HttpContext http,RepositorioAccesoMovil repo) => {
             LeerSesion(http.User,out var org,out var sesion); await repo.CerrarAsync(org,sesion,http.RequestAborted);
             return Results.NoContent();
@@ -203,6 +231,7 @@ public static class AccesoMovil
             try { return Results.Text(await repo.RecibirCapturaAsync(opciones.Value.OrganizacionId,c.AccesoId,c.InstalacionId,ms.ToArray(),http.RequestAborted),"application/json",Encoding.UTF8); }
             catch (PostgresException e) when (e.SqlState=="42501") { return Rechazo(); }
             catch (PostgresException e) when (e.SqlState=="P0409") { return Results.Json(new MensajeError("Esa captura ya se recibió con otro contenido."),statusCode:409); }
+            catch (PostgresException e) when (e.SqlState=="P0422") { return Results.Json(new MensajeError(e.MessageText),statusCode:422); }
             catch (PostgresException e) when (e.SqlState is "22023" or "22P02" or "22003" or "22007" or "23502" or "23514" or "23503" or "23505")
                 { return Results.BadRequest(new MensajeError("El envío no es válido.")); }
         }).RequireAuthorization(Politica);
@@ -210,6 +239,24 @@ public static class AccesoMovil
             var c=(ContextoOperador)http.Items[ItemContexto]!;
             var json=await repo.ConsultarCapturaAsync(opciones.Value.OrganizacionId,c.AccesoId,c.InstalacionId,id,http.RequestAborted);
             return json is null ? Results.NotFound() : Results.Text(json,"application/json",Encoding.UTF8);
+        }).RequireAuthorization(Politica);
+
+        // «Terminar parada» / «Reabrir parada»: el teléfono envía el estado de sus paradas terminadas (idempotente, solo cambios).
+        app.MapPut("/api/movil/paradas-terminadas",async (HttpContext http,RepositorioAccesoMovil repo,IOptions<OpcionesAcceso> opciones) => {
+            if (!http.Request.IsHttps) return Results.BadRequest(new MensajeError("El acceso móvil requiere HTTPS."));
+            http.Response.Headers.CacheControl="no-store";
+            if (!(http.Request.ContentType??"").StartsWith("application/json",StringComparison.OrdinalIgnoreCase))
+                return Results.Json(new MensajeError("El envío debe ser JSON."),statusCode:415);
+            using var ms=new MemoryStream(); var buffer=new byte[8192]; int n; long total=0;
+            while ((n=await http.Request.Body.ReadAsync(buffer,http.RequestAborted))>0) {
+                total+=n; if (total>65536) return Results.Json(new MensajeError("El envío es demasiado grande."),statusCode:413);
+                ms.Write(buffer,0,n);
+            }
+            var c=(ContextoOperador)http.Items[ItemContexto]!;
+            try { return Results.Ok(new { registradas=await repo.RegistrarParadasTerminadasAsync(opciones.Value.OrganizacionId,c.AccesoId,c.InstalacionId,Encoding.UTF8.GetString(ms.ToArray()),http.RequestAborted) }); }
+            catch (PostgresException e) when (e.SqlState=="42501") { return Rechazo(); }
+            catch (PostgresException e) when (e.SqlState is "22023" or "22P02" or "22003" or "22007" or "23502" or "23514" or "23503" or "23505")
+                { return Results.BadRequest(new MensajeError("El envío no es válido.")); }
         }).RequireAuthorization(Politica);
 
         // Plantas (PTAR) para el paso 3. Lista provisional: sitios que no son punto de servicio (ver migración 0026).
@@ -236,6 +283,9 @@ public static class AccesoMovil
             if (esperado.Recibida) return Results.Ok(new { estado="recibida",id });   // reintento: no se vuelve a leer ni a guardar
             var mime=(http.Request.ContentType??"").Split(';')[0].Trim().ToLowerInvariant();
             if (mime is not ("image/jpeg" or "image/png")) return Results.Json(new MensajeError("Tipo de archivo no permitido."),statusCode:415);
+            // Tope de tamaño propio (no el declarado por el cliente): una foto optimizada pesa ~0.5 MB; la firma (PNG), decenas de KB. Configurable.
+            var tope=mime=="image/png" ? config.GetValue("Archivos:MaxFirmaBytes",512*1024L) : config.GetValue("Archivos:MaxFotoBytes",2*1024*1024L);
+            if (esperado.Tamano>tope) return Results.Json(new MensajeError("El archivo es demasiado grande."),statusCode:413);
             var raiz=config["Archivos:Ruta"] ?? (entorno.IsDevelopment() ? Path.GetFullPath(Path.Combine(entorno.ContentRootPath,"..","..",".local","archivos")) : null);
             if (raiz is null) return Results.Json(new MensajeError("El almacenamiento de archivos no está configurado."),statusCode:503);
             var relativa=Path.Combine(org.ToString("N"),id.ToString("N")[..2],id.ToString("N")+(mime=="image/png"?".png":".jpg"));
@@ -254,13 +304,27 @@ public static class AccesoMovil
                 }
                 if (total!=esperado.Tamano || !hash.GetHashAndReset().AsSpan().SequenceEqual(esperado.Sha256))
                     return Results.Json(new MensajeError("El archivo no coincide con lo declarado."),statusCode:422);
-                if (File.Exists(destino)) File.Delete(temporal); else File.Move(temporal,destino);   // idempotente ante reintentos concurrentes
+                // El tipo se comprueba por el CONTENIDO (primeros bytes), no por el encabezado que manda el cliente. No se procesa ni se recomprime la imagen.
+                if (!EsImagenDelTipo(temporal,mime)) return Results.Json(new MensajeError("El archivo no es una imagen del tipo declarado."),statusCode:422);
+                // Idempotente ante reintentos concurrentes: el archivo ya fue verificado (tamaño y SHA-256 contra lo declarado), así que si otra
+                // solicitud lo dejó primero en su lugar, el contenido es el mismo y no se sobrescribe. File.Move sin sobrescribir es atómico: el
+                // perdedor de la carrera recibe IOException y solo descarta su copia temporal.
+                try { File.Move(temporal,destino); }
+                catch (IOException) when (File.Exists(destino)) { File.Delete(temporal); }
                 var json=await repo.RegistrarArchivoAsync(org,c.AccesoId,c.InstalacionId,id,mime,relativa.Replace('\\','/'),ct);
                 return json is null ? Results.NotFound() : Results.Text(json,"application/json",Encoding.UTF8);
             }
             catch (PostgresException e) when (e.SqlState=="42501") { return Rechazo(); }
             finally { try { if (File.Exists(temporal)) File.Delete(temporal); } catch (IOException) { /* queda para limpieza; nunca borra evidencia ya verificada */ } }
         }).RequireAuthorization(Politica);
+    }
+    /// <summary>Firma de archivo: JPEG empieza con FF D8 FF; PNG con 89 50 4E 47 0D 0A 1A 0A.</summary>
+    internal static bool EsImagenDelTipo(string ruta,string mime) {
+        Span<byte> cabecera=stackalloc byte[8];
+        using var f=new FileStream(ruta,FileMode.Open,FileAccess.Read,FileShare.Read);
+        var n=f.Read(cabecera);
+        return mime=="image/png" ? n==8 && cabecera.SequenceEqual(new byte[]{0x89,0x50,0x4E,0x47,0x0D,0x0A,0x1A,0x0A})
+            : n>=3 && cabecera[0]==0xFF && cabecera[1]==0xD8 && cabecera[2]==0xFF;
     }
     private static IResult Rechazo() => Results.Json(new MensajeError(EndpointsAcceso.MensajeNoAutorizada),statusCode:403);
     private static IResult Emitir(Guid org,Guid sesion) => Results.SignIn(new ClaimsPrincipal(new ClaimsIdentity([

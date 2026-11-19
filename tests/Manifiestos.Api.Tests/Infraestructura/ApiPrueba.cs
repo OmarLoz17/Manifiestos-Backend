@@ -26,23 +26,61 @@ public sealed class ValidadorFicticio : IValidadorTokenGoogle
     }
 }
 
+/// <summary>Sustituto de Firebase: guarda los avisos que se habrían enviado.</summary>
+public sealed class EmisorFicticio : Manifiestos.Api.Avisos.IEmisorPush
+{
+    public System.Collections.Concurrent.ConcurrentQueue<(string Token, Manifiestos.Api.Avisos.AvisoPush Aviso)> Enviados { get; } = new();
+    /// <summary>Tokens que «FCM» dice que ya no existen.</summary>
+    public HashSet<string> Muertos { get; } = [];
+    public Task<IReadOnlyList<string>> EnviarAsync(IReadOnlyList<string> tokens, Manifiestos.Api.Avisos.AvisoPush aviso, CancellationToken ct)
+    {
+        foreach (var t in tokens) Enviados.Enqueue((t, aviso));
+        return Task.FromResult<IReadOnlyList<string>>(tokens.Where(Muertos.Contains).ToList());
+    }
+}
+
+/// <summary>Sustituto de Drive: no sale a internet. Inactivo para que el proceso de fondo no corra solo; las pruebas lo invocan a mano.</summary>
+public sealed class DriveFicticio : Manifiestos.Api.Archivos.IAlmacenDrive
+{
+    public bool Activo => false;
+    public bool Fallar { get; set; }
+    public List<(Guid Archivo, string Ruta)> Subidos { get; } = [];
+    /// <summary>Contenido que Drive «tiene» por ID, para probar la lectura cuando el VPS ya no conserva la copia.</summary>
+    public Dictionary<string, byte[]> Contenidos { get; } = [];
+    public Task<byte[]?> LeerAsync(string driveId, CancellationToken ct) => Task.FromResult(Contenidos.TryGetValue(driveId, out var b) ? b : null);
+    public Task<string> SubirAsync(Manifiestos.Api.Archivos.ArchivoParaDrive archivo, string rutaLocal, CancellationToken ct)
+    {
+        if (Fallar) throw new HttpRequestException("Drive caído.");
+        if (!File.Exists(rutaLocal)) throw new FileNotFoundException();
+        Subidos.Add((archivo.ArchivoId, rutaLocal));
+        return Task.FromResult("drive-" + archivo.ArchivoId.ToString("N"));
+    }
+}
+
 public sealed class ApiPrueba(BaseDatosPrueba bd) : WebApplicationFactory<Program>
 {
+    public EmisorFicticio Emisor { get; } = new();
+    public DriveFicticio Drive { get; } = new();
+
     /// <summary>Organización que atiende la API de prueba (la de BaseDatosPrueba salvo que la prueba siembre otra).</summary>
     public Guid Organizacion { get; init; } = BaseDatosPrueba.Organizacion;
 
     /// <summary>Almacén temporal de archivos de evidencia de esta API de prueba (se elimina al terminar).</summary>
     public string RutaArchivos { get; } = Path.Combine(Path.GetTempPath(), "manifiestos-pruebas-" + Guid.NewGuid().ToString("N"));
 
+    /// <summary>Llave de firma de los QR de validación (fuera de RutaArchivos: ahí no debe haber nada que no sea evidencia).</summary>
+    public string RutaLlaveValidacion { get; } = Path.Combine(Path.GetTempPath(), "llave-validacion-pruebas-" + Guid.NewGuid().ToString("N") + ".pem");
+
     protected override void Dispose(bool disposing)
     {
         base.Dispose(disposing);
-        if (disposing) try { if (Directory.Exists(RutaArchivos)) Directory.Delete(RutaArchivos, true); } catch (IOException) { }
+        if (disposing) try { if (Directory.Exists(RutaArchivos)) Directory.Delete(RutaArchivos, true); if (File.Exists(RutaLlaveValidacion)) File.Delete(RutaLlaveValidacion); } catch (IOException) { }
     }
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
         builder.UseSetting("Archivos:Ruta", RutaArchivos);
+        builder.UseSetting("Validacion:RutaLlave", RutaLlaveValidacion);
         // "Testing" evita cargar User Secrets del desarrollador.
         builder.UseEnvironment("Testing");
         builder.UseSetting("ConnectionStrings:Manifiestos", bd.CadenaConexion);
@@ -52,7 +90,7 @@ public sealed class ApiPrueba(BaseDatosPrueba bd) : WebApplicationFactory<Progra
         builder.UseSetting("Acceso:GoogleClientId", "cliente-ficticio.apps.googleusercontent.com");
         builder.UseSetting("Acceso:OrganizacionId", Organizacion.ToString());
         builder.UseSetting("Acceso:IntentosPorMinuto", "1000");
-        builder.ConfigureTestServices(s => s.AddSingleton<IValidadorTokenGoogle, ValidadorFicticio>());
+        builder.ConfigureTestServices(s => { s.AddSingleton<IValidadorTokenGoogle, ValidadorFicticio>(); s.AddSingleton<Manifiestos.Api.Avisos.IEmisorPush>(Emisor); s.AddSingleton<Manifiestos.Api.Archivos.IAlmacenDrive>(Drive); });
     }
 
     /// <summary>Navegador ficticio con su propio almacén de cookies, sobre https (cookies Secure).</summary>

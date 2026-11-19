@@ -177,6 +177,15 @@ public sealed class AccesoMovilTests(BaseDatosPrueba bd) : IClassFixture<BaseDat
         Assert.Equal(HttpStatusCode.Unauthorized,(await cliente.PostAsJsonAsync("/api/movil/auth/refresh",new{tokens.RefreshToken})).StatusCode);
         Assert.Equal("t",await bd.ConsultarAsync($"SELECT vence_en<now() FROM seguridad.sesion_movil WHERE instalacion_id='{e.Instalacion}'"));
     }
+    [Fact] public async Task Una_rafaga_de_renovaciones_y_consultas_de_un_teléfono_no_recibe_429()
+    {
+        // Carga corta: un teléfono que reintenta sin parar (envíos y descargas seguidos) no debe toparse con el límite de acceso.
+        var (cliente,tokens)=await SesionAsync(await PrepararAsync());
+        var respuestas=new List<HttpResponseMessage>();
+        for(var lote=0;lote<15;lote++) respuestas.AddRange(await Task.WhenAll(Enumerable.Range(0,8).Select(_=>cliente.PostAsJsonAsync("/api/movil/auth/refresh",new{tokens.RefreshToken}))));
+        Assert.DoesNotContain(respuestas,r=>r.StatusCode==HttpStatusCode.TooManyRequests);
+        for(var i=0;i<150;i++) Assert.NotEqual(HttpStatusCode.TooManyRequests,(await cliente.PostAsJsonAsync("/api/movil/auth/refresh",new{tokens.RefreshToken})).StatusCode);
+    }
     [Fact] public async Task Renovaciones_concurrentes_y_logout_no_reactivan_sesion()
     {
         var (cliente,tokens)=await SesionAsync(await PrepararAsync());

@@ -54,7 +54,7 @@ INSERT INTO negocio.participante_manifiesto(organizacion_id,sucursal_id,version_
 INSERT INTO negocio.detalle_manifiesto(organizacion_id,sucursal_id,version_id,renglon,descripcion_residuo,cantidad,unidad_cantidad,naturaleza_cantidad,metodo_cuantificacion) VALUES
 (pg_temp.uid('oa'),pg_temp.uid('sa'),pg_temp.uid('vm'),1,'Residuo ficticio',10,'m3','estimada','Ejemplo sin factor real');
 
-SELECT pg_temp.afirmar((SELECT array_agg(valor_m3 ORDER BY valor_m3)=ARRAY[10,15,18]::numeric[] FROM catalogo.capacidad_vehiculo),'capacidades iniciales');
+SELECT pg_temp.afirmar((SELECT array_agg(valor_m3 ORDER BY valor_m3)=ARRAY[1,10,15,18]::numeric[] FROM catalogo.capacidad_vehiculo),'capacidades iniciales (1 m3 de sanitarios más 10, 15 y 18 de fosas)');
 SELECT pg_temp.rechaza($q$INSERT INTO negocio.ficha_vehiculo(organizacion_id,sucursal_id,vehiculo_id,revision,capacidad_id) VALUES(pg_temp.uid('oa'),pg_temp.uid('sa'),pg_temp.uid('va'),2,99)$q$,'23503','capacidad inexistente');
 SELECT pg_temp.rechaza($q$INSERT INTO negocio.orden_servicio(organizacion_id,sucursal_id,cliente_id) VALUES(pg_temp.uid('oa'),pg_temp.uid('sa'),pg_temp.uid('cb'))$q$,'23503','FK impide otra organización');
 SELECT pg_temp.rechaza($q$INSERT INTO negocio.orden_servicio(organizacion_id,sucursal_id,cliente_id) VALUES(pg_temp.uid('oa'),pg_temp.uid('sa'),pg_temp.uid('ca2'))$q$,'23503','FK impide otra sucursal');

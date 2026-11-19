@@ -90,7 +90,8 @@ public sealed class UnidadesTests : IClassFixture<BaseDatosPrueba>, IAsyncLifeti
         Assert.Equal(1, creada.Revision);
 
         var lista = await ListarAsync(nav);
-        Assert.Equal([10m, 15m, 18m], lista.Capacidades.Select(c => c.ValorM3));
+        // 1 m³ es la capacidad de las unidades de sanitarios (id 4); 10, 15 y 18 m³ son de fosas.
+        Assert.Equal([1m, 10m, 15m, 18m], lista.Capacidades.Select(c => c.ValorM3));
         var u = await UnidadAsync(nav, creada.Id);
         Assert.Equal(numero, u.NumeroEconomico);
         Assert.Equal(18m, u.CapacidadM3);
@@ -131,6 +132,35 @@ public sealed class UnidadesTests : IClassFixture<BaseDatosPrueba>, IAsyncLifeti
     }
 
     [Fact]
+    public async Task No_se_cambia_la_clasificacion_de_una_unidad_con_paradas_vigentes()
+    {
+        using var nav = await SesionAsync(true);
+        var numero = $"ARM-{Guid.NewGuid():N}"[..12];
+        var creada = await CrearAsync(nav, Nueva(numero, capacidad: 4, clasificacion: "sanitarios"));
+        var (ruta, parada, sitio) = (Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid());
+        await _bd.SqlComoDuenoAsync($"""
+            BEGIN;
+            INSERT INTO negocio.sitio VALUES ('{Org}', '{Suc}', '{sitio}', 'Sitio unidades');
+            INSERT INTO negocio.punto_servicio VALUES ('{Org}', '{Suc}', '{sitio}');
+            INSERT INTO negocio.ruta(organizacion_id, sucursal_id, id) VALUES ('{Org}', '{Suc}', '{ruta}');
+            INSERT INTO negocio.ruta_version(organizacion_id, sucursal_id, ruta_id, revision, nombre, dias, vehiculo_id) VALUES ('{Org}', '{Suc}', '{ruta}', 1, 'Ruta Unidades Ficticia', 21, '{creada.Id}');
+            INSERT INTO negocio.parada(organizacion_id, sucursal_id, id, ruta_id, posicion) VALUES ('{Org}', '{Suc}', '{parada}', '{ruta}', 1);
+            INSERT INTO negocio.parada_version(organizacion_id, sucursal_id, id, parada_id, revision, sitio_id) VALUES ('{Org}', '{Suc}', '{Guid.NewGuid()}', '{parada}', 1, '{sitio}');
+            COMMIT;
+            """);
+        var url = $"/api/unidades/{creada.Id}";
+        var r = await EnviarAsync(nav, HttpMethod.Put, url, Edicion(1, numero, capacidad: 1, clasificacion: "fosas"));
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, r.StatusCode);
+        Assert.Contains("servicio_distinto", await r.Content.ReadAsStringAsync());
+        Assert.Equal("sanitarios", (await UnidadAsync(nav, creada.Id)).Clasificacion);
+        // Sin cambiar de servicio (otros datos) la edición sigue permitida.
+        Assert.Equal(HttpStatusCode.OK, (await EnviarAsync(nav, HttpMethod.Put, url, Edicion(1, numero + "B", capacidad: 4, clasificacion: "sanitarios"))).StatusCode);
+        // Con la parada dada de baja y sin baños pendientes, ya puede cambiar.
+        await _bd.SqlComoDuenoAsync($"INSERT INTO negocio.parada_baja(organizacion_id, sucursal_id, parada_id) VALUES ('{Org}', '{Suc}', '{parada}');");
+        Assert.Equal(HttpStatusCode.OK, (await EnviarAsync(nav, HttpMethod.Put, url, Edicion(2, numero + "B", capacidad: 1, clasificacion: "fosas"))).StatusCode);
+    }
+
+    [Fact]
     public async Task Corregir_crea_una_revision_nueva_y_una_edicion_vieja_recibe_409()
     {
         using var nav = await SesionAsync(true);
@@ -142,11 +172,11 @@ public sealed class UnidadesTests : IClassFixture<BaseDatosPrueba>, IAsyncLifeti
         var igual = await (await EnviarAsync(nav, HttpMethod.Put, url, Edicion(1, numero, capacidad: 1))).Content.ReadFromJsonAsync<RevisionGuardada>();
         Assert.Equal(1, igual!.Revision);
 
-        var r2 = await EnviarAsync(nav, HttpMethod.Put, url, Edicion(1, $"{numero}-X", capacidad: 2, clasificacion: "sanitarios"));
+        var r2 = await EnviarAsync(nav, HttpMethod.Put, url, Edicion(1, $"{numero}-X", capacidad: 4, clasificacion: "sanitarios"));
         Assert.Equal(HttpStatusCode.OK, r2.StatusCode);
         Assert.Equal(2, (await r2.Content.ReadFromJsonAsync<RevisionGuardada>())!.Revision);
         var u = await UnidadAsync(nav, creada.Id);
-        Assert.Equal(($"{numero}-X", 15m, "sanitarios", 2), (u.NumeroEconomico, u.CapacidadM3, u.Clasificacion, u.Revision));
+        Assert.Equal(($"{numero}-X", 1m, "sanitarios", 2), (u.NumeroEconomico, u.CapacidadM3, u.Clasificacion, u.Revision));
 
         // Quien editó sobre la revisión 1 no pisa la 2.
         await AfirmarErrorAsync(await EnviarAsync(nav, HttpMethod.Put, url, Edicion(1, "OTRO")), HttpStatusCode.Conflict, RepositorioUnidades.MensajeModificada);
@@ -323,5 +353,70 @@ public sealed class UnidadesTests : IClassFixture<BaseDatosPrueba>, IAsyncLifeti
         Assert.Equal([HttpStatusCode.OK, HttpStatusCode.Conflict], estados);
         Assert.Equal("1", await _bd.ConsultarAsync($"SELECT count(*) FROM negocio.asignacion_unidad WHERE vehiculo_id = '{unidad}'"));
         Assert.Equal(1, (await UnidadAsync(nav, unidad)).AsignacionRevision);
+    }
+
+    private async Task AfirmarReglaAsync(HttpResponseMessage r, string codigo)
+    {
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, r.StatusCode);
+        Assert.Equal(codigo, (await r.Content.ReadFromJsonAsync<ErrorNegocio>())!.Error);
+    }
+
+    [Fact]
+    public async Task Sanitarios_solo_con_1_m3_fosas_solo_con_10_15_o_18_y_1_m3_exige_sanitarios()
+    {
+        using var nav = await SesionAsync(true);
+        var numero = $"ARM-{Guid.NewGuid():N}"[..10];
+        var antes = (await ListarAsync(nav)).Unidades.Count;
+        foreach (var (caso, cuerpo) in new (string, object)[]
+        {
+            ("sanitarios con capacidad de fosas", Nueva($"{numero}-1", capacidad: 3, clasificacion: "sanitarios")),
+            ("fosas con 1 m³", Nueva($"{numero}-2", capacidad: 4, clasificacion: "fosas")),
+            ("1 m³ sin clasificar", Nueva($"{numero}-3", capacidad: 4, clasificacion: null)),
+        })
+            await AfirmarReglaAsync(await EnviarAsync(nav, HttpMethod.Post, "/api/unidades", cuerpo), "capacidad_incompatible");
+        Assert.Equal(antes, (await ListarAsync(nav)).Unidades.Count);
+
+        var sanitarios = await CrearAsync(nav, Nueva($"{numero}-S", capacidad: 4, clasificacion: "sanitarios"));
+        var u = await UnidadAsync(nav, sanitarios.Id);
+        Assert.Equal((1m, "sanitarios"), (u.CapacidadM3, u.Clasificacion));
+        // Una unidad sin clasificar sigue pudiendo tener capacidad de fosas (datos anteriores a la clasificación).
+        var sinClasificar = await CrearAsync(nav, Nueva($"{numero}-N", capacidad: 2, clasificacion: null));
+        Assert.Null((await UnidadAsync(nav, sinClasificar.Id)).Clasificacion);
+        // Corregir una unidad existente también valida la combinación y no escribe nada si falla.
+        await AfirmarReglaAsync(await EnviarAsync(nav, HttpMethod.Put, $"/api/unidades/{sanitarios.Id}", Edicion(1, $"{numero}-S", capacidad: 1, clasificacion: "sanitarios")), "capacidad_incompatible");
+        Assert.Equal(1, (await UnidadAsync(nav, sanitarios.Id)).Revision);
+    }
+
+    [Fact]
+    public async Task La_carga_de_la_unidad_es_cero_en_m3_con_su_capacidad_y_respeta_el_contexto()
+    {
+        using var nav = await SesionAsync(true);
+        var numero = $"ARM-{Guid.NewGuid():N}"[..10];
+        var sanitarios = await CrearAsync(nav, Nueva($"{numero}-S", capacidad: 4, clasificacion: "sanitarios"));
+        var fosas = await CrearAsync(nav, Nueva($"{numero}-F", capacidad: 3));
+
+        var carga = (await nav.GetFromJsonAsync<CargaUnidad>($"/api/unidades/{sanitarios.Id}/carga"))!;
+        Assert.Equal((sanitarios.Id, 1m, 0, 0m, 0m), (carga.UnidadId, carga.CapacidadM3, carga.Banos, carga.M3, carga.Porcentaje));
+        Assert.Null(carga.UltimaTiradaEn);
+        Assert.Empty(carga.Desglose);
+        Assert.Equal(18m, (await nav.GetFromJsonAsync<CargaUnidad>($"/api/unidades/{fosas.Id}/carga"))!.CapacidadM3);
+        // El JSON expone m³ y nunca litros.
+        var json = await nav.GetStringAsync($"/api/unidades/{sanitarios.Id}/carga");
+        Assert.Contains("\"m3\"", json);
+        Assert.DoesNotContain("litros", json, StringComparison.OrdinalIgnoreCase);
+
+        // Fuera del contexto (otra sucursal sin permiso), inexistente o sin sesión: no hay carga.
+        var ajena = Guid.NewGuid();
+        await _bd.SqlComoDuenoAsync($"""
+            INSERT INTO negocio.vehiculo VALUES ('{Org}', '{Suc2}', '{ajena}', 'AJENA-{ajena.ToString("N")[..6]}');
+            INSERT INTO negocio.ficha_vehiculo(organizacion_id, sucursal_id, vehiculo_id, revision, capacidad_id, clasificacion) VALUES ('{Org}', '{Suc2}', '{ajena}', 1, 4, 'sanitarios');
+            """);
+        Assert.Equal(HttpStatusCode.NotFound, (await nav.GetAsync($"/api/unidades/{ajena}/carga")).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await nav.GetAsync($"/api/unidades/{Guid.NewGuid()}/carga")).StatusCode);
+        using var anonimo = _api.NuevoNavegador();
+        Assert.Equal(HttpStatusCode.Unauthorized, (await anonimo.GetAsync($"/api/unidades/{sanitarios.Id}/carga")).StatusCode);
+        // Solo lectura también puede ver la carga.
+        using var lector = await SesionAsync(false);
+        Assert.Equal(HttpStatusCode.OK, (await lector.GetAsync($"/api/unidades/{sanitarios.Id}/carga")).StatusCode);
     }
 }

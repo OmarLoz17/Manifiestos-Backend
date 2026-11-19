@@ -10,6 +10,7 @@ public interface IRepositorioUnidades
     Task<ResultadoEscritura> CrearAsync(Guid organizacion, Guid acceso, Guid sucursal, DatosUnidad datos, CancellationToken ct);
     Task<ResultadoEscritura> EditarAsync(Guid organizacion, Guid acceso, Guid unidad, DatosUnidad datos, int revision, CancellationToken ct);
     Task<ResultadoEscritura> AsignarOperadorAsync(Guid organizacion, Guid acceso, Guid unidad, Guid? operador, int revisionVista, CancellationToken ct);
+    Task<CargaUnidad?> CargaAsync(Guid organizacion, Guid acceso, Guid unidad, CancellationToken ct);
 }
 
 /// <summary>
@@ -24,6 +25,8 @@ public sealed class RepositorioUnidades(NpgsqlDataSource datos) : IRepositorioUn
     public const string MensajeCapacidadInvalida = "La capacidad elegida no está en el catálogo.";
     public const string MensajeOperadorModificado = "Alguien más cambió el operador de esta unidad. Recarga para ver los cambios.";
     public const string MensajeOperadorInvalido = "El operador elegido no está disponible.";
+    public const string MensajeCambioClasificacion = "La unidad tiene rutas con paradas o baños sin descargar. Retira o reasigna las paradas y tira la carga antes de cambiar su clasificación.";
+    public const string MensajeCapacidadClasificacion = "La capacidad no corresponde a la clasificación: sanitarios es de 1 m³; fosas, de 10, 15 o 18 m³.";
 
     private const string UltimaFicha = """
         LEFT JOIN LATERAL (SELECT x.* FROM negocio.ficha_vehiculo x
@@ -143,6 +146,11 @@ public sealed class RepositorioUnidades(NpgsqlDataSource datos) : IRepositorioUn
             if (await ValidarAsync(tx, organizacion, sucursal, unidad, d, ct) is { } invalida) return invalida;
             // Sin cambios no se crea una revisión vacía.
             if (vigente == d) return ResultadoEscritura.Correcta(unidad, actual);
+            // El servicio de una ruta sale de la clasificación de su unidad: cambiarla con paradas o baños sin descargar dejaría
+            // el trabajo del operador y la carga huérfanos.
+            if (vigente?.Clasificacion is { } anterior && anterior != d.Clasificacion
+                && await TieneTrabajoVigenteAsync(tx, organizacion, sucursal, unidad, ct))
+                return ResultadoEscritura.Regla("servicio_distinto", MensajeCambioClasificacion);
 
             await InsertarFichaAsync(tx, organizacion, sucursal, unidad, actual + 1, d, ct);
             await tx.ConfirmarAsync(ct);
@@ -213,6 +221,55 @@ public sealed class RepositorioUnidades(NpgsqlDataSource datos) : IRepositorioUn
             return ResultadoEscritura.Correcta(unidad, ultima + 1);
         });
 
+    /// <summary>
+    /// Carga actual de la UNIDAD para el panel (baños sin descargar, en m³ estimados, sin tope de porcentaje). La calcula la base con
+    /// seguridad.carga_unidad_web, que exige datos.leer. null = la unidad no existe o no es visible en el contexto.
+    /// </summary>
+    public async Task<CargaUnidad?> CargaAsync(Guid organizacion, Guid acceso, Guid unidad, CancellationToken ct)
+    {
+        await using var tx = await TransaccionContexto.AbrirAsync(datos, organizacion, acceso, ct);
+        Guid sucursal;
+        await using (var cmd = tx.Comando("SELECT sucursal_id FROM negocio.vehiculo WHERE organizacion_id = $1 AND id = $2 LIMIT 1", organizacion, unidad))
+        {
+            if (await cmd.ExecuteScalarAsync(ct) is not Guid s) return null;
+            sucursal = s;
+        }
+        CargaUnidad? carga = null;
+        await using (var cmd = tx.Comando(
+            "SELECT banos, m3, capacidad_m3, porcentaje, ultima_tirada_en, desglose::text FROM seguridad.carga_unidad_web($1, $2, $3, $4)",
+            organizacion, acceso, sucursal, unidad))
+        await using (var r = await cmd.ExecuteReaderAsync(ct))
+        {
+            if (await r.ReadAsync(ct))
+                carga = new CargaUnidad(unidad, r.IsDBNull(2) ? 0m : r.GetDecimal(2), r.GetInt32(0), r.GetDecimal(1), r.IsDBNull(3) ? 0m : r.GetDecimal(3),
+                    r.IsDBNull(4) ? null : r.GetFieldValue<DateTimeOffset>(4), RepositorioRutas.LeerDesglose(r.IsDBNull(5) ? null : r.GetString(5)));
+        }
+        await tx.ConfirmarAsync(ct);
+        return carga;
+    }
+
+    /// <summary>Rutas de la unidad con paradas vigentes, o baños succionados que aún no entran a una tirada.</summary>
+    private static async Task<bool> TieneTrabajoVigenteAsync(TransaccionContexto tx, Guid org, Guid suc, Guid unidad, CancellationToken ct)
+    {
+        await using var cmd = tx.Comando("""
+            SELECT EXISTS (
+                SELECT 1 FROM negocio.ruta ru
+                JOIN LATERAL (SELECT x.vehiculo_id FROM negocio.ruta_version x
+                    WHERE (x.organizacion_id, x.sucursal_id, x.ruta_id) = (ru.organizacion_id, ru.sucursal_id, ru.id)
+                    ORDER BY x.revision DESC LIMIT 1) rv ON true
+                JOIN negocio.parada pa ON (pa.organizacion_id, pa.sucursal_id, pa.ruta_id) = (ru.organizacion_id, ru.sucursal_id, ru.id)
+                WHERE ru.organizacion_id = $1 AND ru.sucursal_id = $2 AND rv.vehiculo_id = $3
+                  AND NOT EXISTS (SELECT 1 FROM negocio.parada_baja pb
+                                  WHERE (pb.organizacion_id, pb.sucursal_id, pb.parada_id) = (pa.organizacion_id, pa.sucursal_id, pa.id)))
+            OR EXISTS (
+                SELECT 1 FROM negocio.succion_parada sp
+                WHERE (sp.organizacion_id, sp.sucursal_id, sp.vehiculo_id) = ($1, $2, $3)
+                  AND NOT EXISTS (SELECT 1 FROM negocio.tirada_parada tp
+                                  WHERE (tp.organizacion_id, tp.sucursal_id, tp.captura_id) = (sp.organizacion_id, sp.sucursal_id, sp.captura_id)))
+            """, org, suc, unidad);
+        return (bool)(await cmd.ExecuteScalarAsync(ct))!;
+    }
+
     private static async Task<List<Guid>> RutasDeLaUnidadAsync(TransaccionContexto tx, Guid org, Guid suc, Guid unidad, CancellationToken ct)
     {
         var rutas = new List<Guid>();
@@ -239,6 +296,11 @@ public sealed class RepositorioUnidades(NpgsqlDataSource datos) : IRepositorioUn
     {
         await using (var cmd = tx.Comando("SELECT EXISTS (SELECT 1 FROM catalogo.capacidad_vehiculo WHERE id = $1)", d.CapacidadId))
             if (!(bool)(await cmd.ExecuteScalarAsync(ct))!) return ResultadoEscritura.Invalida(MensajeCapacidadInvalida);
+        // Sanitarios = capacidad 4 (1 m³); fosas = 1, 2 o 3 (10/15/18 m³); 1 m³ sin clasificar sanitarios no se admite.
+        if (d.Clasificacion == "sanitarios" ? d.CapacidadId != 4
+            : d.Clasificacion == "fosas" ? d.CapacidadId is not (1 or 2 or 3)
+            : d.CapacidadId == 4)
+            return ResultadoEscritura.Regla("capacidad_incompatible", MensajeCapacidadClasificacion);
         await using (var cmd = tx.Comando($"""
             SELECT EXISTS (
                 SELECT 1 FROM negocio.vehiculo veh

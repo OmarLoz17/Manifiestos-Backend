@@ -22,6 +22,8 @@ public sealed class OpcionesAcceso
     /// <summary>Intentos de inicio de sesión por minuto y dirección IP.</summary>
     [Range(1, 10_000)]
     public int IntentosPorMinuto { get; set; } = 10;
+    /// <summary>Renovaciones de sesión móvil por minuto y por IP (holgado: ver <c>PoliticaRenovar</c>).</summary>
+    public int RenovacionesPorMinuto { get; set; } = 600;
 
     /// <summary>
     /// Acepta tokens de prueba "e2e|correo|nombre" en lugar de Google (ver <see cref="ValidadorTokenE2E"/>).

@@ -105,7 +105,8 @@ public sealed class RepositorioJornadas(NpgsqlDataSource datos) : IRepositorioJo
                               AND a.revision = (SELECT max(b.revision) FROM negocio.asignacion_unidad b
                                     WHERE (b.organizacion_id, b.sucursal_id, b.vehiculo_id) = ($1, $2, $4))
                               AND a.persona_id IS NOT NULL)
-                       AND EXISTS (SELECT 1 FROM negocio.parada p WHERE (p.organizacion_id, p.sucursal_id, p.ruta_id) = ($1, $2, $3))
+                       AND EXISTS (SELECT 1 FROM negocio.parada p WHERE (p.organizacion_id, p.sucursal_id, p.ruta_id) = ($1, $2, $3)
+                              AND NOT EXISTS (SELECT 1 FROM negocio.parada_baja pb WHERE (pb.organizacion_id, pb.sucursal_id, pb.parada_id) = (p.organizacion_id, p.sucursal_id, p.id)))
                     """, organizacion, sucursal, ruta, (object?)vehiculo ?? DBNull.Value);
                 if (!(bool)(await cmd.ExecuteScalarAsync(ct))!) return ResultadoEscritura.Invalida(MensajeIncompleta);
             }
@@ -154,7 +155,7 @@ public static class EndpointsJornadas
             http.Response.Headers.CacheControl = "no-store";
             return Results.Ok(await jornadas.ListarAsync(org, acceso, d, h, http.RequestAborted));
         });
-        g.MapPut("/{ruta:guid}/{fecha}/estado", async (Guid ruta, string fecha, SolicitudEstadoJornada s, HttpContext http, IRepositorioJornadas jornadas) =>
+        g.MapPut("/{ruta:guid}/{fecha}/estado", async (Guid ruta, string fecha, SolicitudEstadoJornada s, HttpContext http, IRepositorioJornadas jornadas, Avisos.AvisosTrabajo avisos) =>
         {
             if (!ServiciosAcceso.LeerIds(http.User, out var org, out var acceso)) return Results.Unauthorized();
             if (!DateOnly.TryParseExact(fecha, "yyyy-MM-dd", out var f)) return Results.BadRequest(new MensajeError("Indica la fecha como AAAA-MM-DD."));
@@ -163,12 +164,19 @@ public static class EndpointsJornadas
             var r = await jornadas.CambiarEstadoAsync(org, acceso, ruta, f, estado, s.Revision.Value, http.RequestAborted);
             return r.Estado switch
             {
-                EstadoEscritura.Correcta => Results.Ok(new RevisionGuardada(r.Id, r.Revision)),
+                EstadoEscritura.Correcta => AvisarCambio(),
                 EstadoEscritura.NoEncontrada => Results.Json(new MensajeError(RepositorioJornadas.MensajeNoEncontrada), statusCode: StatusCodes.Status404NotFound),
                 EstadoEscritura.SinPermiso => Results.Json(new MensajeError(RepositorioJornadas.MensajeSinPermiso), statusCode: StatusCodes.Status403Forbidden),
                 EstadoEscritura.Conflicto => Results.Json(new MensajeError(r.Mensaje!), statusCode: StatusCodes.Status409Conflict),
                 _ => Results.BadRequest(new MensajeError(r.Mensaje!)),
             };
+            IResult AvisarCambio()
+            {
+                // Cancelar o reabrir la ruta de HOY avisa al operador (push); en otros días no hay a quién avisar.
+                var texto = estado == "cancelada" ? "Operaciones canceló tu ruta de hoy." : "Operaciones reabrió tu ruta de hoy.";
+                _ = Task.Run(() => avisos.AvisarAsync(ruta, f, texto));
+                return Results.Ok(new RevisionGuardada(r.Id, r.Revision));
+            }
         }).AddEndpointFilter(EndpointsAcceso.ValidarCsrf);
     }
 }

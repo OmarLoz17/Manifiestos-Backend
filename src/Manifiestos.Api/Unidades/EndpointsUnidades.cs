@@ -5,7 +5,7 @@ namespace Manifiestos.Api.Unidades;
 
 /// <summary>
 /// Pantalla "Unidades" del panel. Alta y corrección de la ficha (número económico, placas, capacidad del
-/// catálogo 10/15/18 m³, clasificación y descripción). El operador y la ruta se muestran pero se asignan en Rutas.
+/// catálogo (1 m³ de sanitarios; 10/15/18 m³ de fosas), clasificación y descripción). El operador y la ruta se muestran pero se asignan en Rutas.
 /// No se borran unidades.
 /// </summary>
 public static class EndpointsUnidades
@@ -25,6 +25,7 @@ public static class EndpointsUnidades
         // Sin AllowAnonymous: la política por defecto exige sesión revalidada.
         var g = app.MapGroup("/api/unidades");
         g.MapGet("", ListarAsync);
+        g.MapGet("/{id:guid}/carga", CargaAsync);
         g.MapPost("", CrearAsync).AddEndpointFilter(EndpointsAcceso.ValidarCsrf);
         g.MapPut("/{id:guid}", EditarAsync).AddEndpointFilter(EndpointsAcceso.ValidarCsrf);
         g.MapPut("/{id:guid}/operador", AsignarOperadorAsync).AddEndpointFilter(EndpointsAcceso.ValidarCsrf);
@@ -35,6 +36,16 @@ public static class EndpointsUnidades
         if (!ServiciosAcceso.LeerIds(http.User, out var org, out var acceso)) return Results.Unauthorized();
         http.Response.Headers.CacheControl = "no-store";
         return Results.Ok(await unidades.ListarAsync(org, acceso, http.RequestAborted));
+    }
+
+    /// <summary>Carga actual de la unidad (baños sin tirar, en m³ estimados). 404 si la unidad no existe o está fuera del contexto.</summary>
+    private static async Task<IResult> CargaAsync(Guid id, HttpContext http, IRepositorioUnidades unidades)
+    {
+        if (!ServiciosAcceso.LeerIds(http.User, out var org, out var acceso)) return Results.Unauthorized();
+        var carga = await unidades.CargaAsync(org, acceso, id, http.RequestAborted);
+        if (carga is null) return Results.Json(new MensajeError(MensajeNoEncontrada), statusCode: StatusCodes.Status404NotFound);
+        http.Response.Headers.CacheControl = "no-store";
+        return Results.Ok(carga);
     }
 
     private static async Task<IResult> CrearAsync(SolicitudNuevaUnidad s, HttpContext http, IRepositorioUnidades unidades)
@@ -87,6 +98,7 @@ public static class EndpointsUnidades
         EstadoEscritura.NoEncontrada => Results.Json(new MensajeError(MensajeNoEncontrada), statusCode: StatusCodes.Status404NotFound),
         EstadoEscritura.SinPermiso => Results.Json(new MensajeError(MensajeSinPermiso), statusCode: StatusCodes.Status403Forbidden),
         EstadoEscritura.Conflicto => Results.Json(new MensajeError(r.Mensaje!), statusCode: StatusCodes.Status409Conflict),
+        EstadoEscritura.Regla => Results.Json(new ErrorNegocio(r.Codigo!, r.Mensaje!), statusCode: StatusCodes.Status422UnprocessableEntity),
         _ => Error(r.Mensaje!),
     };
 

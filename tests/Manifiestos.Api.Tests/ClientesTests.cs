@@ -95,7 +95,7 @@ public sealed class ClientesTests : IClassFixture<BaseDatosPrueba>, IAsyncLifeti
     public async Task Sitios_se_guardan_independientes_de_la_ficha_con_permisos_y_csrf()
     {
         using var nav = await SesionAsync(true);
-        var creado = await CrearAsync(nav, new { sucursalId = Suc, nombreFiscal = "Cliente de obra ficticio", calle = "Domicilio fiscal ficticio" });
+        var creado = await CrearAsync(nav, new { sucursalId = Suc, nombreFiscal = "Cliente de obra ficticio", autorizacion = "AMB-FICT-OBRA", calle = "Domicilio fiscal ficticio" });
         var url = $"/api/clientes/{creado.Id}/sitios";
         var cuerpo = new { sitios = new[] { new { nombre = "Obra sin catálogo", estado = "Estado manual", municipio = "Municipio manual", banos = 10, fosas = 1 } } };
         Assert.False((await EnviarAsync(nav, HttpMethod.Put, url, cuerpo, conCsrf: false)).IsSuccessStatusCode);
@@ -118,7 +118,7 @@ public sealed class ClientesTests : IClassFixture<BaseDatosPrueba>, IAsyncLifeti
     public async Task Sitio_guarda_coordenadas_aproximadas_como_revision_y_valida_el_par()
     {
         using var nav = await SesionAsync(true);
-        var creado = await CrearAsync(nav, new { sucursalId = Suc, nombreFiscal = "Cliente con mapa ficticio" });
+        var creado = await CrearAsync(nav, new { sucursalId = Suc, nombreFiscal = "Cliente con mapa ficticio", autorizacion = "AMB-FICT-MAPA" });
         var url = $"/api/clientes/{creado.Id}/sitios";
         Assert.Equal(HttpStatusCode.BadRequest, (await EnviarAsync(nav, HttpMethod.Put, url, new { sitios = new[] { new { nombre = "Solo latitud", latitud = 25.68m } } })).StatusCode);
         Assert.Equal(HttpStatusCode.BadRequest, (await EnviarAsync(nav, HttpMethod.Put, url, new { sitios = new[] { new { nombre = "Fuera de rango", latitud = 95m, longitud = -100m } } })).StatusCode);
@@ -154,6 +154,7 @@ public sealed class ClientesTests : IClassFixture<BaseDatosPrueba>, IAsyncLifeti
         var (eA, eG, eS, eO) = (N(), N(), N(), N());
         var (cA, cG, cS, cO) = (N(), N(), N(), N());
         var (veh, sitio, r1, r2) = (N(), N(), N(), N());
+        var (sitio2, sitio3) = (N(), N());
         var (p1, p2, p3, p4) = (N(), N(), N(), N());
         var (v11, v12, v21, v31, v32, v41) = (N(), N(), N(), N(), N(), N());
 
@@ -178,8 +179,8 @@ public sealed class ClientesTests : IClassFixture<BaseDatosPrueba>, IAsyncLifeti
             INSERT INTO negocio.cliente VALUES ('{Org}', '{Suc}', '{cA}', '{eA}', NULL), ('{Org}', '{Suc}', '{cG}', '{eG}', NULL),
                 ('{Org}', '{Suc}', '{cS}', '{eS}', '{p} Código Sin Ficha'), ('{Org}', '{Suc2}', '{cO}', '{eO}', NULL);
             INSERT INTO negocio.vehiculo VALUES ('{Org}', '{Suc}', '{veh}', 'U-{p}');
-            INSERT INTO negocio.sitio VALUES ('{Org}', '{Suc}', '{sitio}', 'Obra {p}');
-            INSERT INTO negocio.punto_servicio(organizacion_id, sucursal_id, sitio_id) VALUES ('{Org}', '{Suc}', '{sitio}');
+            INSERT INTO negocio.sitio VALUES ('{Org}', '{Suc}', '{sitio}', 'Obra {p}'), ('{Org}', '{Suc}', '{sitio2}', 'Obra 2 {p}'), ('{Org}', '{Suc}', '{sitio3}', 'Obra 3 {p}');
+            INSERT INTO negocio.punto_servicio(organizacion_id, sucursal_id, sitio_id) VALUES ('{Org}', '{Suc}', '{sitio}'), ('{Org}', '{Suc}', '{sitio2}'), ('{Org}', '{Suc}', '{sitio3}');
             INSERT INTO negocio.ruta(organizacion_id, sucursal_id, id) VALUES ('{Org}', '{Suc}', '{r1}'), ('{Org}', '{Suc}', '{r2}');
             INSERT INTO negocio.ruta_version(organizacion_id, sucursal_id, ruta_id, revision, nombre, dias, vehiculo_id) VALUES
                 ('{Org}', '{Suc}', '{r1}', 1, 'Z nombre viejo {p}', 21, '{veh}'),
@@ -190,8 +191,8 @@ public sealed class ClientesTests : IClassFixture<BaseDatosPrueba>, IAsyncLifeti
                 ('{Org}', '{Suc}', '{p4}', '{r2}', 1);
             INSERT INTO negocio.parada_version(organizacion_id, sucursal_id, id, parada_id, revision, sitio_id) VALUES
                 ('{Org}', '{Suc}', '{v11}', '{p1}', 1, '{sitio}'), ('{Org}', '{Suc}', '{v12}', '{p1}', 2, '{sitio}'),
-                ('{Org}', '{Suc}', '{v21}', '{p2}', 1, '{sitio}'), ('{Org}', '{Suc}', '{v31}', '{p3}', 1, '{sitio}'),
-                ('{Org}', '{Suc}', '{v32}', '{p3}', 2, '{sitio}'), ('{Org}', '{Suc}', '{v41}', '{p4}', 1, '{sitio}');
+                ('{Org}', '{Suc}', '{v21}', '{p2}', 1, '{sitio2}'), ('{Org}', '{Suc}', '{v31}', '{p3}', 1, '{sitio3}'),
+                ('{Org}', '{Suc}', '{v32}', '{p3}', 2, '{sitio3}'), ('{Org}', '{Suc}', '{v41}', '{p4}', 1, '{sitio}');
             INSERT INTO negocio.parada_cliente(organizacion_id, sucursal_id, version_id, cliente_id, banos_planeados) VALUES
                 ('{Org}', '{Suc}', '{v11}', '{cA}', 5),
                 ('{Org}', '{Suc}', '{v12}', '{cA}', 7), ('{Org}', '{Suc}', '{v12}', '{cG}', 3),
@@ -214,8 +215,8 @@ public sealed class ClientesTests : IClassFixture<BaseDatosPrueba>, IAsyncLifeti
         [
             new AsignacionCliente(r2, $"{p} A Ruta", p4, 1, 2, SitioId:sitio),
             new AsignacionCliente(r1, $"{p} B Ruta", p1, 1, 7, SitioId:sitio),
-            new AsignacionCliente(r1, $"{p} B Ruta", p2, 2, null, SitioId:sitio),
-            new AsignacionCliente(r1, $"{p} B Ruta", p3, 3, 1, SitioId:sitio),
+            new AsignacionCliente(r1, $"{p} B Ruta", p2, 2, null, SitioId:sitio2),
+            new AsignacionCliente(r1, $"{p} B Ruta", p3, 3, 1, SitioId:sitio3),
         ], a.Asignaciones);
         Assert.Equal(10, a.Banos);
 

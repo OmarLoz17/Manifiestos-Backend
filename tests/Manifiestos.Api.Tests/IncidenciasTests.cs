@@ -74,6 +74,50 @@ public sealed class IncidenciasTests : IClassFixture<BaseDatosPrueba>, IAsyncLif
     }
 
     [Fact]
+    public async Task La_foto_de_la_incidencia_se_sirve_solo_a_quien_tiene_acceso_y_sin_salir_de_la_carpeta_de_archivos()
+    {
+        var (inc, archivo, sinFoto) = (Guid.NewGuid(), Guid.NewGuid(), await SembrarAsync(Suc));
+        byte[] bytes = [1, 2, 3, 4, 5];
+        var clave = $"{Org:N}/{archivo.ToString("N")[..2]}/{archivo:N}.jpg";
+        Directory.CreateDirectory(Path.GetDirectoryName(Path.Combine(_api.RutaArchivos, clave))!);
+        await File.WriteAllBytesAsync(Path.Combine(_api.RutaArchivos, clave), bytes);
+        var sha = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes));
+        await _bd.SqlComoDuenoAsync($"""
+            BEGIN;
+            INSERT INTO negocio.archivo(organizacion_id, sucursal_id, id, sha256, tamano_bytes, mime) VALUES ('{Org}', '{Suc}', '{archivo}', decode('{sha}', 'hex'), 5, 'image/jpeg');
+            INSERT INTO negocio.ubicacion_archivo(organizacion_id, sucursal_id, archivo_id, proveedor, clave_externa, verificada_en) VALUES ('{Org}', '{Suc}', '{archivo}', 'vps', '{clave}', now());
+            INSERT INTO negocio.incidencia(organizacion_id, sucursal_id, id, servicio, motivo, ocurrida_en, evidencia_archivo_id)
+            VALUES ('{Org}', '{Suc}', '{inc}', 'fosa', 'sin_acceso', now(), '{archivo}');
+            COMMIT;
+            """);
+        using var nav = await SesionAsync(false);
+        var r = await nav.GetAsync($"/api/incidencias/{inc}/foto");
+        Assert.Equal(HttpStatusCode.OK, r.StatusCode);
+        Assert.Equal("image/jpeg", r.Content.Headers.ContentType?.MediaType);
+        Assert.Equal(bytes, await r.Content.ReadAsByteArrayAsync());
+        Assert.Equal(HttpStatusCode.NotFound, (await nav.GetAsync($"/api/incidencias/{sinFoto}/foto")).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await nav.GetAsync($"/api/incidencias/{Guid.NewGuid()}/foto")).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await _api.NuevoNavegador().GetAsync($"/api/incidencias/{inc}/foto")).StatusCode);
+        // Endpoint general de archivos (botón «Foto» de Órdenes): mismo acceso, sin sesión no hay archivo y un id ajeno no existe.
+        var general = await nav.GetAsync($"/api/archivos/{archivo}");
+        Assert.Equal(HttpStatusCode.OK, general.StatusCode);
+        Assert.Equal(bytes, await general.Content.ReadAsByteArrayAsync());
+        Assert.Equal(HttpStatusCode.NotFound, (await nav.GetAsync($"/api/archivos/{Guid.NewGuid()}")).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await _api.NuevoNavegador().GetAsync($"/api/archivos/{archivo}")).StatusCode);
+        // Retención: la copia del VPS se limpió pero Drive la conserva; el backend la lee de Drive (sin enlaces públicos) y, si tampoco está, 404.
+        await _bd.SqlComoDuenoAsync($"""
+            INSERT INTO negocio.ubicacion_archivo(organizacion_id, sucursal_id, archivo_id, proveedor, clave_externa, verificada_en) VALUES ('{Org}', '{Suc}', '{archivo}', 'drive', 'drive-{archivo:N}', now());
+            """);
+        File.Delete(Path.Combine(_api.RutaArchivos, clave));
+        Assert.Equal(HttpStatusCode.NotFound, (await nav.GetAsync($"/api/archivos/{archivo}")).StatusCode);
+        _api.Drive.Contenidos[$"drive-{archivo:N}"] = bytes;
+        var desdeDrive = await nav.GetAsync($"/api/incidencias/{inc}/foto");
+        Assert.Equal(HttpStatusCode.OK, desdeDrive.StatusCode);
+        Assert.Equal(bytes, await desdeDrive.Content.ReadAsByteArrayAsync());
+        Assert.Equal("image/jpeg", (await nav.GetAsync($"/api/archivos/{archivo}")).Content.Headers.ContentType?.MediaType);
+    }
+
+    [Fact]
     public async Task Lista_incidencias_abiertas_con_folio_referencias_banos_y_ubicacion()
     {
         var fosa = await SembrarAsync(Suc);
@@ -89,6 +133,48 @@ public sealed class IncidenciasTests : IClassFixture<BaseDatosPrueba>, IAsyncLif
         Assert.Single(f.Historial);
         var s = await IncidenciaAsync(nav, sanitario);
         Assert.Equal((12, 8), (s.BanosAsignados, s.BanosAtendidos));
+    }
+
+    [Fact]
+    public async Task Una_incidencia_de_parada_extraordinaria_no_rompe_el_listado_y_conserva_sitio_y_ubicacion()
+    {
+        var (ruta, unidad, sitioPlan, sitioExtra, parada, version, extra, persona) =
+            (Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid());
+        var (delPlan, deExtra, deExtraSanitario) = (Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid());
+        string Incidencia(Guid id, string servicio, Guid? p) => $"""
+            INSERT INTO negocio.incidencia(organizacion_id, sucursal_id, id, servicio, motivo, descripcion, ocurrida_en, ruta_id, parada_id, vehiculo_id, persona_id,
+                latitud, longitud, precision_m)
+            VALUES ('{Org}', '{Suc}', '{id}', '{servicio}', 'sin_acceso', 'Incidencia ficticia.', '2026-11-05T11:10:00-06:00', '{ruta}', '{p}', '{unidad}', '{persona}', 25.68, -100.31, 8);
+            """;
+        await _bd.SqlComoDuenoAsync($"""
+            BEGIN;
+            INSERT INTO negocio.vehiculo VALUES ('{Org}', '{Suc}', '{unidad}', 'EXT-{unidad.ToString("N")[..5]}');
+            INSERT INTO seguridad.persona VALUES ('{Org}', '{persona}', 'Operador Extra Ficticio');
+            INSERT INTO negocio.ruta(organizacion_id, sucursal_id, id) VALUES ('{Org}', '{Suc}', '{ruta}');
+            INSERT INTO negocio.ruta_version(organizacion_id, sucursal_id, ruta_id, revision, nombre, dias, vehiculo_id) VALUES ('{Org}', '{Suc}', '{ruta}', 1, 'Ruta Extra Ficticia', 127, '{unidad}');
+            INSERT INTO negocio.sitio VALUES ('{Org}', '{Suc}', '{sitioPlan}', 'Sitio plan'), ('{Org}', '{Suc}', '{sitioExtra}', 'Sitio extra');
+            INSERT INTO negocio.punto_servicio VALUES ('{Org}', '{Suc}', '{sitioPlan}'), ('{Org}', '{Suc}', '{sitioExtra}');
+            INSERT INTO negocio.ficha_sitio(organizacion_id, sucursal_id, sitio_id, revision, nombre, latitud, longitud) VALUES
+                ('{Org}', '{Suc}', '{sitioPlan}', 1, 'Sitio del plan', 25.61, -100.21), ('{Org}', '{Suc}', '{sitioExtra}', 1, 'Sitio extraordinario', 25.62, -100.22);
+            INSERT INTO negocio.parada(organizacion_id, sucursal_id, id, ruta_id, posicion) VALUES ('{Org}', '{Suc}', '{parada}', '{ruta}', 3);
+            INSERT INTO negocio.parada_version(organizacion_id, sucursal_id, id, parada_id, revision, sitio_id) VALUES ('{Org}', '{Suc}', '{version}', '{parada}', 1, '{sitioPlan}');
+            INSERT INTO negocio.parada_extraordinaria(organizacion_id, sucursal_id, id, ruta_id, fecha, sitio_id) VALUES ('{Org}', '{Suc}', '{extra}', '{ruta}', '2026-11-05', '{sitioExtra}');
+            {Incidencia(delPlan, "fosa", parada)}
+            {Incidencia(deExtra, "fosa", extra)}
+            {Incidencia(deExtraSanitario, "sanitario", extra)}
+            COMMIT;
+            """);
+        using var nav = await SesionAsync(false);
+        var respuesta = await nav.GetAsync("/api/incidencias");
+        Assert.Equal(HttpStatusCode.OK, respuesta.StatusCode);   // antes de corregir, una extraordinaria hacía fallar todo el listado
+        var lista = (await respuesta.Content.ReadFromJsonAsync<List<IncidenciaResumen>>())!;
+        var p = lista.Single(x => x.Id == delPlan).Parada!;
+        Assert.Equal((3, false, "Sitio del plan"), (p.Posicion, p.Extraordinaria, p.Sitio));
+        foreach (var id in new[] { deExtra, deExtraSanitario })
+        {
+            var e = lista.Single(x => x.Id == id).Parada!;
+            Assert.Equal((null, true, "Sitio extraordinario", 25.62m, -100.22m), (e.Posicion, e.Extraordinaria, e.Sitio, e.Latitud, e.Longitud));
+        }
     }
 
     [Fact]

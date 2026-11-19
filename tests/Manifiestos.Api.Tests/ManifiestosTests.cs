@@ -101,6 +101,8 @@ public sealed class ManifiestosTests : IClassFixture<BaseDatosPrueba>, IAsyncLif
         using var nav = await SesionAsync();
         var x = Assert.Single(await ListarAsync(nav), i => i.Id == m.Manifiesto);
         Assert.Equal((m.Cliente, "MAN-FICTICIO-1", 1), (x.Cliente, x.Folio, x.Revision));
+        // Los manifiestos de fosa fija existentes conservan su forma: tipo fosa_fija, con cliente y sin bloque de sanitarios.
+        Assert.Equal(("fosa_fija", true, true), (x.Tipo, x.ClienteId is not null, x.Sanitarios is null));
         Assert.Equal((m.Unidad, 15m), (x.Unidad?.NumeroEconomico, x.Unidad?.CapacidadM3));
         Assert.Equal("PTAR Ficticia Norte", x.Descarga?.Planta);
         Assert.NotNull(x.Descarga?.Fecha);
@@ -225,5 +227,113 @@ public sealed class ManifiestosTests : IClassFixture<BaseDatosPrueba>, IAsyncLif
         var error = await Assert.ThrowsAsync<InvalidOperationException>(() => GenerarAsync(correo, cliente, Guid.NewGuid()));
         Assert.Contains("Sin permiso", error.Message);
         Assert.Equal(antes, await _bd.ConsultarAsync("SELECT count(*) FROM negocio.manifiesto"));
+    }
+
+    // ---- QR de validación firmado (0058) ----
+
+    private async Task<(HttpStatusCode Estado, CodigoValidacion? Codigo)> EmitirCodigoAsync(HttpClient nav, Guid manifiesto)
+    {
+        using var req = new HttpRequestMessage(HttpMethod.Post, $"/api/manifiestos/{manifiesto}/validacion");
+        req.Headers.Add(Manifiestos.Api.Acceso.ServiciosAcceso.CabeceraCsrf, await nav.CsrfAsync());
+        var r = await nav.SendAsync(req);
+        return (r.StatusCode, r.IsSuccessStatusCode ? await r.Content.ReadFromJsonAsync<CodigoValidacion>() : null);
+    }
+
+    private static string Alterar(string codigo) => codigo[..^2] + (codigo[^2] == 'A' ? "B" : "A") + codigo[^1];
+
+    [Fact]
+    public async Task El_panel_emite_un_codigo_firmado_idempotente_solo_con_folio_sesion_y_csrf()
+    {
+        var m = await SembrarAsync(Suc, "2026-11-04T09:00:00-06:00", conDescarga: true, folio: "001/2026");
+        var sinFolio = await SembrarAsync(Suc, "2026-11-04T09:00:00-06:00", conDescarga: false, folio: null);
+        using var nav = await SesionAsync();
+        var (estado, a) = await EmitirCodigoAsync(nav, m.Manifiesto);
+        Assert.Equal(HttpStatusCode.OK, estado);
+        Assert.Matches(@"^[\w-]{22}\.[\w-]{86}$", a!.Codigo);
+        Assert.Matches(@"^[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}$", a.Huella);
+        // Imprimir otra vez da el MISMO código (misma huella: no se acumulan registros).
+        Assert.Equal(a, (await EmitirCodigoAsync(nav, m.Manifiesto)).Codigo);
+        Assert.Equal("1", await _bd.ConsultarAsync($"SELECT count(*) FROM negocio.codigo_validacion_manifiesto WHERE manifiesto_id = '{m.Manifiesto}'"));
+        Assert.Equal(HttpStatusCode.Conflict, (await EmitirCodigoAsync(nav, sinFolio.Manifiesto)).Estado);
+        using var anonimo = _api.NuevoNavegador();
+        Assert.Equal(HttpStatusCode.Unauthorized, (await anonimo.PostAsync($"/api/manifiestos/{m.Manifiesto}/validacion", null)).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await nav.PostAsync($"/api/manifiestos/{m.Manifiesto}/validacion", null)).StatusCode);   // sin CSRF
+    }
+
+    [Fact]
+    public async Task La_pagina_publica_acepta_el_codigo_autentico_y_rechaza_cualquier_alteracion_sin_dar_pistas()
+    {
+        var m = await SembrarAsync(Suc, "2026-11-04T09:00:00-06:00", conDescarga: true, folio: "002/2026");
+        using var nav = await SesionAsync();
+        var codigo = (await EmitirCodigoAsync(nav, m.Manifiesto)).Codigo!;
+        using var publico = _api.NuevoNavegador();   // sin sesión
+        var ok = (await publico.GetFromJsonAsync<ResultadoValidacion>($"/api/validacion/{codigo.Codigo}"))!;
+        Assert.Equal("autentico", ok.Estado);
+        Assert.Equal(("002/2026", m.Cliente, "Transportes Ficticios SA", "PTAR Ficticia Norte", 15m, "m3"),
+            (ok.Datos!.Folio, ok.Datos.Generador, ok.Datos.Transportista, ok.Datos.Destinatario, ok.Datos.Cantidad, ok.Datos.Unidad));
+        Assert.Equal(codigo.Huella, ok.Datos.Huella);
+        // Firma alterada, id de otro registro con la firma de este, y basura: todo «no_autentico» y sin datos.
+        var otro = await SembrarAsync(Suc, "2026-11-05T09:00:00-06:00", conDescarga: true, folio: "003/2026");
+        var codigoOtro = (await EmitirCodigoAsync(nav, otro.Manifiesto)).Codigo!.Codigo;
+        var cruzado = codigoOtro.Split('.')[0] + "." + codigo.Codigo.Split('.')[1];
+        foreach (var malo in new[] { Alterar(codigo.Codigo), cruzado, "basura", codigo.Codigo.Split('.')[0] + ".", Guid.NewGuid().ToString("N") })
+        {
+            var r = (await publico.GetFromJsonAsync<ResultadoValidacion>($"/api/validacion/{malo}"))!;
+            Assert.Equal(("no_autentico", null), (r.Estado, r.Datos));
+        }
+        // Cada consulta válida queda en la bitácora de escaneos (solo con una huella del origen, no la dirección).
+        Assert.Equal("1", await _bd.ConsultarAsync($"SELECT count(*) FROM negocio.escaneo_validacion e JOIN negocio.codigo_validacion_manifiesto c ON c.id = e.codigo_id WHERE c.manifiesto_id = '{m.Manifiesto}' AND e.resultado = 'autentico'"));
+        Assert.Equal("t", await _bd.ConsultarAsync("SELECT bool_and(length(origen) = 12) FROM negocio.escaneo_validacion"));
+    }
+
+    [Fact]
+    public async Task Verificar_lo_impreso_detecta_la_hoja_modificada_aunque_el_qr_sea_el_mismo()
+    {
+        var m = await SembrarAsync(Suc, "2026-11-04T09:00:00-06:00", conDescarga: true, folio: "004/2026");
+        using var nav = await SesionAsync();
+        var codigo = (await EmitirCodigoAsync(nav, m.Manifiesto)).Codigo!.Codigo;
+        using var publico = _api.NuevoNavegador();
+        async Task<ResultadoVerificacion> Verificar(VerificacionImpresa v) =>
+            (await (await publico.PostAsJsonAsync($"/api/validacion/{codigo}/verificar", v)).Content.ReadFromJsonAsync<ResultadoVerificacion>())!;
+        // Mayúsculas, acentos y espacios de más no cuentan; los datos exactos coinciden.
+        Assert.True((await Verificar(new VerificacionImpresa("004/2026", 15m, "  ptar   ficticia norte ", null, null, 0))).Coincide);
+        // Misma hoja pero con otra cantidad y otro destinatario: no coincide y dice qué cambió.
+        var mal = await Verificar(new VerificacionImpresa("004/2026", 18m, "Otra planta", null, null, null));
+        Assert.False(mal.Coincide);
+        Assert.Equal(["cantidad", "destinatario"], mal.Diferencias.Select(d => d.Campo).Order());
+        Assert.Equal("15", mal.Diferencias.Single(d => d.Campo == "cantidad").Emitido);
+        // Con un código alterado ni siquiera se compara.
+        var r = await (await publico.PostAsJsonAsync($"/api/validacion/{Alterar(codigo)}/verificar", new VerificacionImpresa("004/2026", 15m, null, null, null, null))).Content.ReadFromJsonAsync<ResultadoVerificacion>();
+        Assert.Equal(("no_autentico", false), (r!.Estado, r.Coincide));
+    }
+
+    [Fact]
+    public async Task Un_manifiesto_con_version_posterior_se_marca_reemplazado_y_la_llave_publica_comprueba_la_firma_fuera_del_sistema()
+    {
+        var m = await SembrarAsync(Suc, "2026-11-04T09:00:00-06:00", conDescarga: true, folio: "005/2026");
+        using var nav = await SesionAsync();
+        var codigo = (await EmitirCodigoAsync(nav, m.Manifiesto)).Codigo!.Codigo;
+        // Verificación independiente: solo con la llave pública, el contenido guardado y la firma del QR (lo que haría un módulo externo).
+        using var publico = _api.NuevoNavegador();
+        var pem = await publico.GetStringAsync("/api/validacion/llave-publica");
+        using var llave = System.Security.Cryptography.ECDsa.Create();
+        llave.ImportFromPem(pem);
+        var contenido = await _bd.ConsultarAsync($"SELECT contenido FROM negocio.codigo_validacion_manifiesto WHERE manifiesto_id = '{m.Manifiesto}'");
+        var base64 = codigo.Split('.')[1].Replace('-', '+').Replace('_', '/');
+        var firma = Convert.FromBase64String(base64.PadRight(base64.Length + (4 - base64.Length % 4) % 4, '='));
+        var sha = System.Security.Cryptography.HashAlgorithmName.SHA256;
+        var formato = System.Security.Cryptography.DSASignatureFormat.IeeeP1363FixedFieldConcatenation;
+        Assert.True(llave.VerifyData(System.Text.Encoding.UTF8.GetBytes(contenido), firma, sha, formato));
+        Assert.False(llave.VerifyData(System.Text.Encoding.UTF8.GetBytes(contenido.Replace("15", "18")), firma, sha, formato));
+        // Una versión nueva del manifiesto deja al papel anterior como «reemplazado» (sigue siendo auténtico, pero ya no vigente).
+        await _bd.SqlComoDuenoAsync($"""
+            BEGIN;
+            INSERT INTO negocio.version_manifiesto(organizacion_id, sucursal_id, manifiesto_id, revision, numero_manifiesto)
+            VALUES ('{Org}', '{Suc}', '{m.Manifiesto}', 2, '005/2026');
+            COMMIT;
+            """);
+        var r = (await publico.GetFromJsonAsync<ResultadoValidacion>($"/api/validacion/{codigo}"))!;
+        Assert.Equal("reemplazado", r.Estado);
+        Assert.Equal("005/2026", r.Datos!.Folio);
     }
 }
