@@ -215,6 +215,8 @@ public static class ServiciosDrive
         services.AddHttpClient<IAlmacenDrive, AlmacenDrive>();
         services.AddSingleton<ProcesoSubidaDrive>();
         services.AddHostedService(sp => sp.GetRequiredService<ProcesoSubidaDrive>());
+        services.AddSingleton<LimpiezaArchivosLocales>();
+        services.AddHostedService(sp => sp.GetRequiredService<LimpiezaArchivosLocales>());
         return services;
     }
 }

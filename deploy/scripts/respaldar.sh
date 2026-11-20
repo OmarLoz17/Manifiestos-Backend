@@ -22,11 +22,23 @@ echo "== Base de datos"
 "${compose[@]}" exec -T postgres pg_dump -U manifiestos_owner -d manifiestos -Fc > "$destino/base.dump"
 "${compose[@]}" exec -T postgres pg_dumpall -U manifiestos_owner --globals-only > "$destino/roles.sql"
 echo "== Volúmenes"
-for vol in archivos claves_sesion; do
-  docker run --rm -v "${proyecto}_${vol}:/v:ro" -v "$destino_abs:/o" "$imagen" tar czf "/o/$vol.tgz" -C /v .
-done
+docker run --rm -v "${proyecto}_claves_sesion:/v:ro" -v "$destino_abs:/o" "$imagen" tar czf "/o/claves_sesion.tgz" -C /v .
+# ARCHIVOS_MODO=completo (por omisión): todo el volumen de evidencias.
+# ARCHIVOS_MODO=pendientes: solo lo que AÚN no tiene copia verificada en Drive (con Drive activo y la limpieza por retención, es
+# lo único que el VPS tiene y Drive no). Lo demás vive en Drive; restaurar sirve esos archivos desde Drive. Antes de usarlo,
+# comprobar que Drive esté activo y archivando (si no, «pendientes» sería casi todo, y está bien: nunca omite lo no archivado).
+modo="${ARCHIVOS_MODO:-completo}"
+case "$modo" in
+  completo) docker run --rm -v "${proyecto}_archivos:/v:ro" -v "$destino_abs:/o" "$imagen" tar czf "/o/archivos.tgz" -C /v . ;;
+  pendientes)
+    "${compose[@]}" exec -T postgres psql -X -At -U manifiestos_owner -d manifiestos -c "SELECT v.clave_externa FROM negocio.ubicacion_archivo v WHERE v.proveedor = 'vps' AND NOT EXISTS (SELECT 1 FROM negocio.ubicacion_archivo d WHERE (d.organizacion_id, d.sucursal_id, d.archivo_id) = (v.organizacion_id, v.sucursal_id, v.archivo_id) AND d.proveedor = 'drive' AND d.verificada_en IS NOT NULL)" > "$destino/archivos.lista"
+    docker run --rm -i -v "${proyecto}_archivos:/v:ro" -v "$destino_abs:/o" "$imagen" bash -c 'cd /v && tar czf /o/archivos.tgz --ignore-failed-read -T -' < "$destino/archivos.lista"
+    rm -f "$destino/archivos.lista" ;;
+  *) echo "ARCHIVOS_MODO debe ser completo o pendientes." >&2; exit 1 ;;
+esac
+echo "$modo" > "$destino/archivos.modo"
 echo "== Secretos (cifrados)"
 tar czf - -C "$secretos" . | RESPALDO_FRASE="$(cat "$clave")" openssl enc -aes-256-cbc -pbkdf2 -salt -pass env:RESPALDO_FRASE > "$destino/secretos.tgz.enc"
-( cd "$destino" && sha256sum base.dump roles.sql archivos.tgz claves_sesion.tgz secretos.tgz.enc > SHA256SUMS )
+( cd "$destino" && sha256sum base.dump roles.sql archivos.tgz archivos.modo claves_sesion.tgz secretos.tgz.enc > SHA256SUMS )
 echo "Respaldo listo en: $destino"
 ls -l "$destino"
