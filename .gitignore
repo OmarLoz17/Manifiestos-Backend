@@ -31,3 +31,4 @@ deploy/respaldos/
 deploy/ensayo/tls/
 deploy/.env
 deploy/ensayo/.estado/
+deploy/restaurado/

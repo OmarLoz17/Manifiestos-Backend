@@ -14,6 +14,8 @@ imagen="${IMAGEN_UTILIDADES:-postgres:18.6-bookworm}"
 compose=(docker compose -p "$proyecto" -f compose.yaml)
 [ -f compose.ensayo.yaml ] && [ -n "${ENSAYO:-}" ] && compose+=(-f compose.ensayo.yaml)
 mkdir -p "$destino"; destino_abs="$(cd "$destino" && pwd)"
+# Un respaldo incompleto (sin SHA256SUMS, que se escribe al final) se borra: no debe contar para la rotación ni parecer válido.
+trap '[ -f "$destino_abs/SHA256SUMS" ] || { rm -rf "$destino_abs"; echo "Respaldo incompleto descartado." >&2; }' EXIT
 export SECRETOS_DIR="$secretos"
 
 echo "== Base de datos"
