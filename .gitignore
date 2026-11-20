@@ -21,3 +21,6 @@ secrets.json
 *.csv
 *.tsv
 *.pdf
+
+# Registro de la API (archivos diarios; ver operacion.MD)
+logs/
