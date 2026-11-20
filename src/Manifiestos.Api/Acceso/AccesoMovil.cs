@@ -1,6 +1,7 @@
 using System.Security.Claims;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.BearerToken;
 using Microsoft.AspNetCore.Authorization;
@@ -49,11 +50,12 @@ public sealed class RepositorioAccesoMovil(NpgsqlDataSource datos)
         return await cmd.ExecuteScalarAsync(ct) as string;
     }
     /// <summary>Estado de «Terminar parada» enviado por el teléfono ({"paradas":[{jornadaId,paradaId,terminada}]}); solo registra cambios. Migración 0056.</summary>
-    public async Task<int> RegistrarParadasTerminadasAsync(Guid org, Guid acceso, Guid instalacion, string json, CancellationToken ct)
+    public async Task<string> RegistrarParadasTerminadasAsync(Guid org, Guid acceso, Guid instalacion, string json, CancellationToken ct)
     {
-        await using var cmd = datos.CreateCommand("SELECT seguridad.registrar_paradas_terminadas($1,$2,$3,$4::jsonb)");
+        // Resultado POR PARADA (aceptada, duplicada o rechazada): el teléfono solo da por confirmado lo aceptado o duplicado (migración 0065).
+        await using var cmd = datos.CreateCommand("SELECT seguridad.registrar_paradas_terminadas_detalle($1,$2,$3,$4::jsonb)::text");
         cmd.Parameters.AddWithValue(org); cmd.Parameters.AddWithValue(acceso); cmd.Parameters.AddWithValue(instalacion); cmd.Parameters.AddWithValue(json);
-        return (int)(await cmd.ExecuteScalarAsync(ct))!;
+        return (string)(await cmd.ExecuteScalarAsync(ct))!;
     }
     /// <summary>Registra una captura (hecho recibido) con el sobre EXACTO; idempotente por (instalación, id). Ver migración 0024.</summary>
     public async Task<string> RecibirCapturaAsync(Guid org, Guid acceso, Guid instalacion, byte[] solicitud, CancellationToken ct)
@@ -253,7 +255,11 @@ public static class AccesoMovil
                 ms.Write(buffer,0,n);
             }
             var c=(ContextoOperador)http.Items[ItemContexto]!;
-            try { return Results.Ok(new { registradas=await repo.RegistrarParadasTerminadasAsync(opciones.Value.OrganizacionId,c.AccesoId,c.InstalacionId,Encoding.UTF8.GetString(ms.ToArray()),http.RequestAborted) }); }
+            try {
+                var detalle=await repo.RegistrarParadasTerminadasAsync(opciones.Value.OrganizacionId,c.AccesoId,c.InstalacionId,Encoding.UTF8.GetString(ms.ToArray()),http.RequestAborted);
+                using var doc=JsonDocument.Parse(detalle);
+                return Results.Ok(new { registradas=doc.RootElement.EnumerateArray().Count(x => x.GetProperty("resultado").GetString()=="aceptada"), paradas=doc.RootElement.Clone() });
+            }
             catch (PostgresException e) when (e.SqlState=="42501") { return Rechazo(); }
             catch (PostgresException e) when (e.SqlState is "22023" or "22P02" or "22003" or "22007" or "23502" or "23514" or "23503" or "23505")
                 { return Results.BadRequest(new MensajeError("El envío no es válido.")); }

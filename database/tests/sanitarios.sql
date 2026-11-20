@@ -366,6 +366,9 @@ VALUES (pg_temp.uid('o'),pg_temp.uid('s'),pg_temp.uid('r2'),current_date,1,pg_te
 SELECT pg_temp.afirmar(pg_temp.terminar_k(pg_temp.uid('j2'),false,0)=0,'con el cambio del día a otra persona, el titular fijo ya no cierra la parada (H02)');
 SELECT pg_temp.afirmar(NOT negocio.persona_opera_unidad(pg_temp.uid('o'),pg_temp.uid('s'),pg_temp.uid('vsan'),pg_temp.uid('p1'),clock_timestamp()),'el titular fijo no opera la unidad si el cambio del día la dio a otra persona');
 SELECT pg_temp.afirmar(negocio.persona_opera_unidad(pg_temp.uid('o'),pg_temp.uid('s'),pg_temp.uid('vsan'),pg_temp.uid('p2'),clock_timestamp()),'la persona del cambio del día opera la unidad');
+-- (0065, H15) El resultado es POR PARADA: una de otra ruta se rechaza y una ya registrada es duplicada.
+SELECT pg_temp.afirmar((SELECT r->>'resultado' FROM jsonb_array_elements(seguridad.registrar_paradas_terminadas_detalle(pg_temp.uid('o'),pg_temp.uid('a'),pg_temp.uid('i'),
+    jsonb_build_object('paradas',jsonb_build_array(jsonb_build_object('jornadaId',pg_temp.uid('j2'),'paradaId',pg_temp.uid('pa'),'terminada',true))))) r)='rechazada','la parada de otra ruta se reporta rechazada');
 SELECT pg_temp.rechaza($q$UPDATE negocio.parada_terminada_dia SET terminada=true$q$,'23514','parada_terminada_dia inmutable');
 ROLLBACK;
 
