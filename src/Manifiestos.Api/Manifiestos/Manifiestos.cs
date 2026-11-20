@@ -129,7 +129,7 @@ public sealed class RepositorioManifiestos(NpgsqlDataSource datos) : IRepositori
         await using (var cmd = tx.Comando("""
             WITH caps AS (
                 SELECT om.organizacion_id, om.sucursal_id, om.manifiesto_id, ct.captura_id FROM negocio.orden_manifiesto om
-                JOIN negocio.captura_trabajo ct ON (ct.organizacion_id, ct.sucursal_id, ct.orden_derivada_id) = (om.organizacion_id, om.sucursal_id, om.orden_derivada_id) AND ct.tipo <> 'PROBLEMA'
+                JOIN negocio.captura_trabajo_efectiva ct ON (ct.organizacion_id, ct.sucursal_id, ct.orden_derivada_id) = (om.organizacion_id, om.sucursal_id, om.orden_derivada_id) AND ct.tipo <> 'PROBLEMA'
                 -- La tirada tiene su propio id: las firmas (operador y quien recibe) cuelgan de la CAPTURA de la tirada.
                 UNION SELECT tm.organizacion_id, tm.sucursal_id, tm.manifiesto_id, ti.captura_id FROM negocio.tirada_manifiesto tm
                 JOIN negocio.tirada ti ON (ti.organizacion_id, ti.sucursal_id, ti.id) = (tm.organizacion_id, tm.sucursal_id, tm.tirada_id)
@@ -161,7 +161,7 @@ public sealed class RepositorioManifiestos(NpgsqlDataSource datos) : IRepositori
         var plantaFosaFija = new Dictionary<Guid, DescargaDeManifiesto>();
         await using (var cmd = tx.Comando("""
             SELECT om.manifiesto_id, ct.planta_nombre, kt.ocurrida_en FROM negocio.orden_manifiesto om
-            JOIN negocio.captura_trabajo ct ON (ct.organizacion_id, ct.sucursal_id, ct.orden_derivada_id) = (om.organizacion_id, om.sucursal_id, om.orden_derivada_id) AND ct.tipo = 'RECEPCION_PLANTA'
+            JOIN negocio.captura_trabajo_efectiva ct ON (ct.organizacion_id, ct.sucursal_id, ct.orden_derivada_id) = (om.organizacion_id, om.sucursal_id, om.orden_derivada_id) AND ct.tipo = 'RECEPCION_PLANTA'
             LEFT JOIN negocio.captura kt ON (kt.organizacion_id, kt.sucursal_id, kt.id) = (ct.organizacion_id, ct.sucursal_id, ct.captura_id)
             WHERE om.organizacion_id = $1 ORDER BY kt.ocurrida_en
             """, organizacion))

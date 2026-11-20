@@ -196,10 +196,10 @@ public sealed class RepositorioOrdenes(NpgsqlDataSource datos) : IRepositorioOrd
                 SELECT ct.orden_derivada_id, ct.tipo, k.ocurrida_en,
                        (SELECT e.archivo_id FROM negocio.evidencia_captura e WHERE (e.organizacion_id, e.sucursal_id, e.captura_id) = (ct.organizacion_id, ct.sucursal_id, ct.captura_id) AND e.rol = 'FOTO' AND e.archivo_id IS NOT NULL LIMIT 1),
                        (SELECT e.archivo_id FROM negocio.evidencia_captura e WHERE (e.organizacion_id, e.sucursal_id, e.captura_id) = (ct.organizacion_id, ct.sucursal_id, ct.captura_id) AND e.rol IN ('FIRMA_OPERADOR', 'FIRMA_CLIENTE', 'FIRMA_RECEPCION') AND e.archivo_id IS NOT NULL LIMIT 1)
-                FROM negocio.captura_trabajo ct JOIN negocio.captura k ON (k.organizacion_id, k.sucursal_id, k.id) = (ct.organizacion_id, ct.sucursal_id, ct.captura_id)
+                FROM negocio.captura_trabajo_efectiva ct JOIN negocio.captura k ON (k.organizacion_id, k.sucursal_id, k.id) = (ct.organizacion_id, ct.sucursal_id, ct.captura_id)
                 JOIN negocio.jornada j ON (j.organizacion_id, j.sucursal_id, j.id) = (ct.organizacion_id, ct.sucursal_id, ct.jornada_id)
                 WHERE ct.organizacion_id = $1 AND j.fecha = $2::date AND ct.tipo IN ('SERVICIO_OPERADOR', 'FIRMA_CLIENTE', 'RECEPCION_PLANTA')
-                  AND NOT EXISTS (SELECT 1 FROM negocio.captura_por_revisar r WHERE (r.organizacion_id, r.sucursal_id, r.captura_id) = (ct.organizacion_id, ct.sucursal_id, ct.captura_id))
+                  AND negocio.captura_aplicable(ct.organizacion_id, ct.sucursal_id, ct.captura_id)
                 """, organizacion, dia2))
             await using (var r = await cmd.ExecuteReaderAsync(ct))
                 while (await r.ReadAsync(ct))
@@ -506,7 +506,7 @@ public sealed class RepositorioOrdenes(NpgsqlDataSource datos) : IRepositorioOrd
                 int ultima;
                 await using (var cmd = tx.Comando("""
                     SELECT coalesce(max(g), 0) FROM generate_series(1, 500) g
-                    WHERE EXISTS (SELECT 1 FROM negocio.captura_trabajo ct WHERE ct.organizacion_id = $1 AND ct.sucursal_id = $2
+                    WHERE EXISTS (SELECT 1 FROM negocio.captura_trabajo_efectiva ct WHERE ct.organizacion_id = $1 AND ct.sucursal_id = $2
                                   AND ct.orden_derivada_id = md5($3::text || ':' || $4::text || ':' || $5::text || ':' || g::text)::uuid)
                     """, organizacion, sucursal, j, parada, cliente))
                     ultima = Convert.ToInt32(await cmd.ExecuteScalarAsync(ct));

@@ -279,6 +279,37 @@ public sealed class CapturasMovilTests(BaseDatosPrueba bd) : IClassFixture<BaseD
         Assert.Equal("1", await ManifiestosDeAsync(o.Ordenes[0]));
     }
 
+    [Fact]
+    public async Task Sin_ubicar_aparece_en_por_corregir_y_asignarlo_a_la_orden_correcta_arma_el_manifiesto()
+    {
+        var s = await SesionAsync(); var o = await OrdenesAsync(s, fosas: 1, autorizado: true);
+        var inventada = Guid.NewGuid(); var falsa = o with { Ordenes = [inventada] };   // el teléfono manda una orden que el servidor no conoce
+        foreach (var paso in new[] { "servicio", "cliente", "planta" }) { Assert.Equal(HttpStatusCode.OK, (await PasoAsync(s, falsa, 0, paso)).StatusCode); await RecibirArchivosAsync(s, inventada); }
+        Assert.Equal("3", await bd.ConsultarAsync($"SELECT count(*) FROM negocio.captura_por_revisar r JOIN negocio.captura_trabajo t USING (organizacion_id, sucursal_id, captura_id) WHERE t.orden_derivada_id='{inventada}'"));
+        Assert.Equal("0", await ManifiestosDeAsync(o.Ordenes[0]));
+
+        var correo = $"sin-ubicar-{Guid.NewGuid():N}@example.invalid";
+        await bd.AutorizarAsync(correo, escribir: true);
+        var web = _api.NuevoNavegador();
+        Assert.Equal(HttpStatusCode.NoContent, (await web.EntrarAsync(ValidadorFicticio.Token($"s-{correo}", correo))).StatusCode);
+        var lista = JsonDocument.Parse(await web.GetStringAsync("/api/incidencias/por-corregir/sin-ubicar")).RootElement.EnumerateArray().Where(x => x.GetProperty("estado").GetString() == "pendiente").ToList();
+        var mias = lista.Where(x => x.GetProperty("motivo").GetString() == "orden_no_resuelta").ToList();
+        Assert.True(mias.Count >= 3);
+        Assert.All(mias.Take(3), x => { Assert.True(x.GetProperty("puedeAsignar").GetBoolean()); Assert.Contains(x.GetProperty("ordenes").EnumerateArray(), q => q.GetProperty("ordenId").GetGuid() == o.Ordenes[0]); });
+
+        var ids = (await bd.ConsultarAsync($"SELECT string_agg(captura_id::text, ',') FROM negocio.captura_trabajo WHERE orden_derivada_id='{inventada}'")).Split(',');
+        foreach (var id in ids)
+        {
+            var peticion = new HttpRequestMessage(HttpMethod.Post, $"/api/incidencias/por-corregir/sin-ubicar/{id}/resolver") { Content = JsonContent.Create(new { accion = "asignar", ordenId = o.Ordenes[0] }) };
+            peticion.Headers.Add(ServiciosAcceso.CabeceraCsrf, await web.CsrfAsync());
+            Assert.Equal(HttpStatusCode.NoContent, (await web.SendAsync(peticion)).StatusCode);
+        }
+        Assert.Equal("1", await ManifiestosDeAsync(o.Ordenes[0]));   // con las tres capturas asignadas y sus archivos recibidos, la orden arma su manifiesto
+        var repetir = new HttpRequestMessage(HttpMethod.Post, $"/api/incidencias/por-corregir/sin-ubicar/{ids[0]}/resolver") { Content = JsonContent.Create(new { accion = "corregido" }) };
+        repetir.Headers.Add(ServiciosAcceso.CabeceraCsrf, await web.CsrfAsync());
+        Assert.Equal(HttpStatusCode.Conflict, (await web.SendAsync(repetir)).StatusCode);
+    }
+
     [Theory]
     [InlineData(true)]   // la fosa propia (cliente general) ya no es una orden: viaja como parada de sanitarios (decisión 0033)
     public async Task Ordenes_muestra_por_orden_si_firmaron_el_transportista_el_cliente_y_agua_y_drenaje(bool autorizado)

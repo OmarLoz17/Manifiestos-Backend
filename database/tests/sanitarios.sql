@@ -401,5 +401,26 @@ SELECT set_config('app.acceso_id',pg_temp.uid('otra')::text,true);
 SELECT pg_temp.afirmar(seguridad.corregir_captura_web(pg_temp.uid('o'),pg_temp.uid('otra'),pg_temp.uid('cx1'),'dejar',NULL) IN ('sin_permiso','no_encontrada'),'sin permiso sobre la sucursal no corrige');
 ROLLBACK;
 
+-- 22. (0068, H08) «No se pudo ubicar»: un servicio con una parada que no es de la ruta queda por revisar; se asigna a una parada de la ruta o se marca como corregido.
+BEGIN;
+SELECT pg_temp.succion('cs1','j1','pd',7,now());   -- 'pd' es de otra ruta: parada_no_resuelta
+SELECT pg_temp.succion('cs2','j1','pd',3,now());
+SELECT pg_temp.afirmar((SELECT count(*)=2 FROM negocio.captura_por_revisar WHERE motivo='parada_no_resuelta' AND captura_id IN (pg_temp.uid('cs1'),pg_temp.uid('cs2'))),'las dos succiones quedaron por revisar');
+INSERT INTO seguridad.permiso_sucursal VALUES (pg_temp.uid('o'),pg_temp.uid('s'),pg_temp.uid('lee'),'datos.escribir');
+SET LOCAL ROLE manifiestos_app;
+SELECT set_config('app.organizacion_id',pg_temp.uid('o')::text,true), set_config('app.acceso_id',pg_temp.uid('lee')::text,true);
+CREATE TEMP TABLE su AS SELECT e FROM jsonb_array_elements(seguridad.sin_ubicar_web(pg_temp.uid('o'),pg_temp.uid('lee'))) e WHERE e->>'capturaId'=pg_temp.uid('cs1')::text;
+SELECT pg_temp.afirmar((SELECT e->>'estado'='pendiente' AND (e->>'puedeAsignar')::boolean AND jsonb_array_length(e->'paradas')=2 FROM su),'aparece pendiente, asignable y con las paradas de su ruta');
+SELECT pg_temp.afirmar(seguridad.resolver_sin_ubicar_web(pg_temp.uid('o'),pg_temp.uid('lee'),pg_temp.uid('cs1'),'asignar',NULL,pg_temp.uid('pd'))='destino_invalido','una parada de otra ruta no es destino');
+SELECT pg_temp.afirmar(seguridad.resolver_sin_ubicar_web(pg_temp.uid('o'),pg_temp.uid('lee'),pg_temp.uid('cs1'),'asignar',NULL,pg_temp.uid('pb'))='ok','asignar a una parada de la ruta');
+SELECT pg_temp.afirmar((SELECT parada_id=pg_temp.uid('pb') AND banos_succionados=7 FROM negocio.succion_parada WHERE captura_id=pg_temp.uid('cs1')),'la succión se registra en esa parada con sus baños originales');
+SELECT pg_temp.afirmar(seguridad.resolver_sin_ubicar_web(pg_temp.uid('o'),pg_temp.uid('lee'),pg_temp.uid('cs1'),'corregido',NULL,NULL)='ya_resuelto','una decisión no se repite');
+SELECT pg_temp.afirmar(seguridad.resolver_sin_ubicar_web(pg_temp.uid('o'),pg_temp.uid('lee'),pg_temp.uid('cs2'),'corregido',NULL,NULL)='ok','marcar como corregido');
+SELECT pg_temp.afirmar((SELECT count(*)=0 FROM negocio.succion_parada WHERE captura_id=pg_temp.uid('cs2')),'corregido sin asignar no aplica nada');
+SELECT pg_temp.afirmar((SELECT count(*)=2 FROM jsonb_array_elements(seguridad.sin_ubicar_web(pg_temp.uid('o'),pg_temp.uid('lee'))) e WHERE e->>'estado'='resuelta' AND e->>'capturaId' IN (pg_temp.uid('cs1')::text,pg_temp.uid('cs2')::text)),'las dos quedan en resueltas');
+SELECT set_config('app.acceso_id',pg_temp.uid('otra')::text,true);
+SELECT pg_temp.afirmar(seguridad.resolver_sin_ubicar_web(pg_temp.uid('o'),pg_temp.uid('otra'),pg_temp.uid('cs1'),'corregido',NULL,NULL) IN ('sin_permiso','no_encontrada','ya_resuelto'),'sin permiso no decide');
+ROLLBACK;
+
 SELECT count(*) AS comprobaciones_tirada FROM comprobacion_tirada;
 \echo 'Comprobaciones de captura de baños y tirada terminadas sin error.'
