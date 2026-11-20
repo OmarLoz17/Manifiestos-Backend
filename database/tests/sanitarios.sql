@@ -372,5 +372,26 @@ SELECT pg_temp.afirmar((SELECT r->>'resultado' FROM jsonb_array_elements(segurid
 SELECT pg_temp.rechaza($q$UPDATE negocio.parada_terminada_dia SET terminada=true$q$,'23514','parada_terminada_dia inmutable');
 ROLLBACK;
 
+-- 21. (0066) «Por corregir»: un servicio cuya foto está junto a OTRA parada de la ruta se sugiere mover; mover exige permiso de escritura y deja constancia.
+BEGIN;
+INSERT INTO negocio.ficha_sitio(organizacion_id,sucursal_id,sitio_id,revision,nombre,latitud,longitud) VALUES
+ (pg_temp.uid('o'),pg_temp.uid('s'),pg_temp.uid('a'),1,'Sitio A',25.6702,-100.3000),   -- a ~913 m de la foto del helper
+ (pg_temp.uid('o'),pg_temp.uid('s'),pg_temp.uid('b'),1,'Sitio B',25.6702,-100.3095);   -- b a ~40 m de la foto
+SELECT pg_temp.succion('cx1','j1','pa',5,now());
+INSERT INTO seguridad.permiso_sucursal VALUES (pg_temp.uid('o'),pg_temp.uid('s'),pg_temp.uid('lee'),'datos.escribir');
+SET LOCAL ROLE manifiestos_app;
+SELECT set_config('app.organizacion_id',pg_temp.uid('o')::text,true), set_config('app.acceso_id',pg_temp.uid('lee')::text,true);
+CREATE TEMP TABLE pc AS SELECT e FROM jsonb_array_elements(seguridad.por_corregir_web(pg_temp.uid('o'),pg_temp.uid('lee'))) e WHERE e->>'capturaId'=pg_temp.uid('cx1')::text;
+SELECT pg_temp.afirmar((SELECT e->>'estado'='pendiente' AND e->>'sugeridaId'=pg_temp.uid('pb')::text AND e->>'registradaId'=pg_temp.uid('pa')::text FROM pc),'servicio junto a otra parada: pendiente con sugerencia');
+SELECT pg_temp.afirmar(seguridad.corregir_captura_web(pg_temp.uid('o'),pg_temp.uid('lee'),pg_temp.uid('cx1'),'mover',pg_temp.uid('pd'))='destino_invalido','una parada de otra ruta no es destino válido');
+SELECT pg_temp.afirmar(seguridad.corregir_captura_web(pg_temp.uid('o'),pg_temp.uid('lee'),pg_temp.uid('cx1'),'mover',pg_temp.uid('pb'))='ok','mover a la parada correcta');
+SELECT pg_temp.afirmar((SELECT parada_id=pg_temp.uid('pb') FROM negocio.succion_parada WHERE captura_id=pg_temp.uid('cx1')),'la succión queda en la parada correcta');
+SELECT pg_temp.afirmar((SELECT parada_origen_id=pg_temp.uid('pa') AND parada_destino_id=pg_temp.uid('pb') AND accion='mover' FROM negocio.correccion_captura WHERE captura_id=pg_temp.uid('cx1')),'queda constancia de la parada original');
+SELECT pg_temp.afirmar(seguridad.corregir_captura_web(pg_temp.uid('o'),pg_temp.uid('lee'),pg_temp.uid('cx1'),'mover',pg_temp.uid('pa'))='ya_resuelto','una decisión no se repite');
+SELECT pg_temp.afirmar((SELECT count(*)=1 FROM jsonb_array_elements(seguridad.por_corregir_web(pg_temp.uid('o'),pg_temp.uid('lee'))) e WHERE e->>'capturaId'=pg_temp.uid('cx1')::text AND e->>'estado'='resuelta'),'queda en resueltas');
+SELECT set_config('app.acceso_id',pg_temp.uid('otra')::text,true);
+SELECT pg_temp.afirmar(seguridad.corregir_captura_web(pg_temp.uid('o'),pg_temp.uid('otra'),pg_temp.uid('cx1'),'dejar',NULL) IN ('sin_permiso','no_encontrada'),'sin permiso sobre la sucursal no corrige');
+ROLLBACK;
+
 SELECT count(*) AS comprobaciones_tirada FROM comprobacion_tirada;
 \echo 'Comprobaciones de captura de baños y tirada terminadas sin error.'

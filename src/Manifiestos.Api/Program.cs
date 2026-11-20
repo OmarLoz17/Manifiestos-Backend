@@ -53,6 +53,7 @@ app.MapearOperadores();
 app.MapearManifiestos();
 app.MapearValidacion();
 app.MapearIncidencias();
+app.MapearPorCorregir();
 app.MapearJornadas();
 app.MapearOrdenes();
 app.MapearArchivos();
