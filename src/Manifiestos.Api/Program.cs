@@ -10,10 +10,12 @@ using Manifiestos.Api.Documentos;
 using Manifiestos.Api.Operadores;
 using Manifiestos.Api.Avisos;
 using Manifiestos.Api.Ordenes;
+using Manifiestos.Api.Registro;
 using Manifiestos.Api.Sitios;
 using Manifiestos.Api.Unidades;
 
 var builder = WebApplication.CreateBuilder(args);
+builder.AgregarRegistroEnArchivo();
 
 builder.Services.AgregarProxyConfiable(builder.Configuration);
 builder.Services.AgregarAccesoWeb();
@@ -54,6 +56,7 @@ app.MapearManifiestos();
 app.MapearValidacion();
 app.MapearIncidencias();
 app.MapearPorCorregir();
+app.MapearErroresDelCliente();
 app.MapearJornadas();
 app.MapearOrdenes();
 app.MapearArchivos();
