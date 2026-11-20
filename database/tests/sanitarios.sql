@@ -357,6 +357,14 @@ SELECT pg_temp.afirmar(pg_temp.terminar_k(pg_temp.uid('j2'),true,1)=1,'terminar 
 SELECT pg_temp.afirmar(pg_temp.terminar_k(pg_temp.uid('j2'),true,1)=0,'repetir lo mismo no registra nada');
 SELECT pg_temp.afirmar(pg_temp.terminar_k(pg_temp.uid('j2'),true,2)=1,'terminar otra vez con 2 no necesarias es otra revisión');
 SELECT pg_temp.afirmar((SELECT no_necesarias=2 FROM negocio.parada_terminada_dia WHERE parada_id=pg_temp.uid('pc') ORDER BY revision DESC LIMIT 1),'la última revisión guarda el número de órdenes no necesarias');
+-- (0067, H17) Las identidades de las órdenes no necesarias: se guardan, se validan contra las órdenes de ESA parada y repetirlas es duplicado.
+CREATE FUNCTION pg_temp.terminar_ids(ids uuid[]) RETURNS text LANGUAGE sql AS $$
+    SELECT r->>'resultado' FROM jsonb_array_elements(seguridad.registrar_paradas_terminadas_detalle(pg_temp.uid('o'),pg_temp.uid('a'),pg_temp.uid('i'),
+        jsonb_build_object('paradas',jsonb_build_array(jsonb_build_object('jornadaId',pg_temp.uid('j2'),'paradaId',pg_temp.uid('pc'),'terminada',true,'ordenesNoNecesarias',to_jsonb(ids)))))) r $$;
+SELECT pg_temp.afirmar(pg_temp.terminar_ids(ARRAY[md5(pg_temp.uid('j2')::text||':'||pg_temp.uid('pc')::text||':'||pg_temp.uid('c')::text||':2')::uuid])='aceptada','terminar con la identidad de una orden de la parada se acepta');
+SELECT pg_temp.afirmar((SELECT ordenes_no_necesarias=ARRAY[md5(pg_temp.uid('j2')::text||':'||pg_temp.uid('pc')::text||':'||pg_temp.uid('c')::text||':2')::uuid] AND no_necesarias=1 FROM negocio.parada_terminada_dia WHERE parada_id=pg_temp.uid('pc') ORDER BY revision DESC LIMIT 1),'se guardan las identidades y el conteo es su número');
+SELECT pg_temp.afirmar(pg_temp.terminar_ids(ARRAY[md5(pg_temp.uid('j2')::text||':'||pg_temp.uid('pc')::text||':'||pg_temp.uid('c')::text||':2')::uuid])='duplicada','repetir las mismas identidades es duplicado');
+SELECT pg_temp.afirmar(pg_temp.terminar_ids(ARRAY[gen_random_uuid()])='rechazada','una identidad que no es de la parada se rechaza');
 -- (0060, H01) El alcance del cierre: parada de otra ruta, conteo mayor que las órdenes y persona que ya no opera la unidad se ignoran.
 SELECT pg_temp.afirmar(seguridad.registrar_paradas_terminadas(pg_temp.uid('o'),pg_temp.uid('a'),pg_temp.uid('i'),
     jsonb_build_object('paradas',jsonb_build_array(jsonb_build_object('jornadaId',pg_temp.uid('j2'),'paradaId',pg_temp.uid('pa'),'terminada',true))))=0,'una parada de otra ruta no se cierra con esta jornada');

@@ -23,7 +23,7 @@ public sealed record ClienteDeOrden(Guid ClienteId, string Nombre, bool Autoriza
 /// </summary>
 /// <summary>Imagen de una firma de una orden (archivo de evidencia) y cuándo se hizo; se ve con GET /api/archivos/{id}.</summary>
 public sealed record FirmaDeOrden(Guid ArchivoId, DateTimeOffset En);
-public sealed record OrdenDeCliente(int Numero, bool Transportista, bool Cliente, bool AguaYDrenaje, DateTimeOffset? ServicioEn = null, Guid? FotoId = null,
+public sealed record OrdenDeCliente(Guid? Id, int Numero, bool Transportista, bool Cliente, bool AguaYDrenaje, DateTimeOffset? ServicioEn = null, Guid? FotoId = null,
     FirmaDeOrden? FirmaTransportista = null, FirmaDeOrden? FirmaCliente = null, FirmaDeOrden? FirmaPlanta = null);
 /// <summary>
 /// Atención de una parada de SANITARIOS en el día pedido (se calcula de las capturas): baños succionados, cuándo se capturó la primera
@@ -34,11 +34,11 @@ public sealed record OrdenDeCliente(int Numero, bool Transportista, bool Cliente
 public sealed record CapturaSanitarios(Guid? FotoId, DateTimeOffset CapturadaEn, int BanosSuccionados, int BanosCubiertos, bool EsFosa, bool Tirada = false);
 public sealed record AtencionSanitarios(int BanosSuccionados, DateTimeOffset CapturadaEn, bool Tirada, Guid? FotoId = null, int? BanosCubiertos = null, IReadOnlyList<CapturaSanitarios>? Capturas = null);
 public sealed record ParadaDeOrden(Guid Id, int Posicion, string? Sitio, string? Direccion, IReadOnlyList<ClienteDeOrden> Clientes,
-    decimal? Latitud = null, decimal? Longitud = null, AtencionSanitarios? Atencion = null, bool NoSeHara = false, bool Terminada = false, int NoNecesarias = 0, bool Reportada = false);
+    decimal? Latitud = null, decimal? Longitud = null, AtencionSanitarios? Atencion = null, bool NoSeHara = false, bool Terminada = false, int NoNecesarias = 0, bool Reportada = false, IReadOnlyList<Guid>? OrdenesNoNecesarias = null);
 /// <summary>Parada extraordinaria: se agregó a la ruta de UN día (cliente no planeado que pidió succión); no se repite.</summary>
 public sealed record ParadaExtraordinaria(
     Guid Id, DateOnly Fecha, string? Sitio, string? Direccion, IReadOnlyList<ClienteDeOrden> Clientes, DateTimeOffset CreadaEn,
-    decimal? Latitud = null, decimal? Longitud = null, AtencionSanitarios? Atencion = null, Guid? FusionadaEn = null, bool NoSeHara = false, bool Terminada = false, int NoNecesarias = 0, bool Reportada = false);
+    decimal? Latitud = null, decimal? Longitud = null, AtencionSanitarios? Atencion = null, Guid? FusionadaEn = null, bool NoSeHara = false, bool Terminada = false, int NoNecesarias = 0, bool Reportada = false, IReadOnlyList<Guid>? OrdenesNoNecesarias = null);
 public sealed record RutaDeOrdenes(
     Guid Id, Guid SucursalId, string Nombre, IReadOnlyList<int> Dias, UnidadDeOrden Unidad, OperadorResumen? Operador,
     IReadOnlyList<ParadaDeOrden> Paradas, IReadOnlyList<ParadaExtraordinaria>? Extraordinarias = null, bool CambioDelDia = false,
@@ -237,16 +237,17 @@ public sealed class RepositorioOrdenes(NpgsqlDataSource datos) : IRepositorioOrd
         }
         // «Terminar parada» del teléfono (migración 0056): paradas del día que el operador cerró con las órdenes que necesitó. Vale la última revisión.
         var paradasTerminadas = new Dictionary<Guid, int>();   // parada -> órdenes que no se necesitaron
+        var ordenesNoNecesarias = new Dictionary<Guid, IReadOnlyList<Guid>>();   // parada -> sus identidades (si el teléfono las mandó)
         if (fecha is { } diaT && !rango)
         {
             await using var cmd = tx.Comando("""
-                SELECT DISTINCT ON (t.jornada_id, t.parada_id) t.parada_id, t.terminada, t.no_necesarias
+                SELECT DISTINCT ON (t.jornada_id, t.parada_id) t.parada_id, t.terminada, t.no_necesarias, t.ordenes_no_necesarias
                 FROM negocio.parada_terminada_dia t JOIN negocio.jornada j ON (j.organizacion_id, j.sucursal_id, j.id) = (t.organizacion_id, t.sucursal_id, t.jornada_id)
                 WHERE t.organizacion_id = $1 AND j.fecha = $2::date
                 ORDER BY t.jornada_id, t.parada_id, t.revision DESC
                 """, organizacion, diaT);
             await using var r = await cmd.ExecuteReaderAsync(ct);
-            while (await r.ReadAsync(ct)) if (r.GetBoolean(1)) paradasTerminadas[r.GetGuid(0)] = r.GetInt32(2);
+            while (await r.ReadAsync(ct)) if (r.GetBoolean(1)) { paradasTerminadas[r.GetGuid(0)] = r.GetInt32(2); var ids = r.GetFieldValue<Guid[]>(3); if (ids.Length > 0) ordenesNoNecesarias[r.GetGuid(0)] = ids; }
         }
         // Sanitarios: succiones capturadas del día por parada (del plan o extraordinaria); Tirada = TODAS ya entraron en una tirada.
         var atencionSanitarios = new Dictionary<Guid, AtencionSanitarios>();
@@ -296,11 +297,11 @@ public sealed class RepositorioOrdenes(NpgsqlDataSource datos) : IRepositorioOrd
                     if (c.FosaPropia && antes + n - 1 < fosas.Count)
                     {
                         var k = fosas[antes + n - 1];
-                        return new OrdenDeCliente(n, true, true, k.Tirada, k.CapturadaEn, k.FotoId);   // atendida; Agua y Drenaje = ya se descargó en la planta
+                        return new OrdenDeCliente(null, n, true, true, k.Tirada, k.CapturadaEn, k.FotoId);   // atendida; Agua y Drenaje = ya se descargó en la planta
                     }
                     var orden = jornada == Guid.Empty ? Guid.Empty : IdOrden(jornada, parada, c.ClienteId, n);
                     var firmaPropia = !c.Autorizado || c.FosaPropia;   // el generador es nuestra empresa: no firma el cliente
-                    return new OrdenDeCliente(n, firmas.Contains((orden, "SERVICIO_OPERADOR")), firmaPropia || firmas.Contains((orden, "FIRMA_CLIENTE")), firmas.Contains((orden, "RECEPCION_PLANTA")), servicioEn.TryGetValue(orden, out var hora) ? hora : null, fotoDe.TryGetValue(orden, out var foto) ? foto : null,
+                    return new OrdenDeCliente(orden == Guid.Empty ? null : orden, n, firmas.Contains((orden, "SERVICIO_OPERADOR")), firmaPropia || firmas.Contains((orden, "FIRMA_CLIENTE")), firmas.Contains((orden, "RECEPCION_PLANTA")), servicioEn.TryGetValue(orden, out var hora) ? hora : null, fotoDe.TryGetValue(orden, out var foto) ? foto : null,
                         firmaDe.GetValueOrDefault((orden, "SERVICIO_OPERADOR")), firmaDe.GetValueOrDefault((orden, "FIRMA_CLIENTE")), firmaDe.GetValueOrDefault((orden, "RECEPCION_PLANTA")));
                 }).ToList(),
             };
@@ -336,8 +337,8 @@ public sealed class RepositorioOrdenes(NpgsqlDataSource datos) : IRepositorioOrd
                     r.GetGuid(0), r.GetGuid(1), r.GetString(2), DiasSemana.Lista(r.GetInt16(3)),
                     new UnidadDeOrden(r.GetGuid(4), T(r, 5), r.IsDBNull(6) ? null : r.GetDecimal(6), T(r, 7)),
                     r.IsDBNull(8) ? null : new OperadorResumen(r.GetGuid(8), T(r, 9) ?? "Operador sin nombre"),
-                    (paradas.GetValueOrDefault(r.GetGuid(0)) ?? []).Select(p => p with { Clientes = ConFirmasDe(r.GetGuid(0), p.Id, p.Clientes), Atencion = atencionSanitarios.GetValueOrDefault(p.Id), Terminada = paradasTerminadas.ContainsKey(p.Id), NoNecesarias = paradasTerminadas.GetValueOrDefault(p.Id), Reportada = paradasReportadas.Contains(p.Id) }).ToList(),
-                    (extras.GetValueOrDefault(r.GetGuid(0)) ?? []).Select(p => p with { Clientes = ConFirmasDe(r.GetGuid(0), p.Id, p.Clientes), Atencion = atencionSanitarios.GetValueOrDefault(p.Id), Terminada = paradasTerminadas.ContainsKey(p.Id), NoNecesarias = paradasTerminadas.GetValueOrDefault(p.Id), Reportada = paradasReportadas.Contains(p.Id) }).ToList(),
+                    (paradas.GetValueOrDefault(r.GetGuid(0)) ?? []).Select(p => p with { Clientes = ConFirmasDe(r.GetGuid(0), p.Id, p.Clientes), Atencion = atencionSanitarios.GetValueOrDefault(p.Id), Terminada = paradasTerminadas.ContainsKey(p.Id), NoNecesarias = paradasTerminadas.GetValueOrDefault(p.Id), Reportada = paradasReportadas.Contains(p.Id), OrdenesNoNecesarias = ordenesNoNecesarias.GetValueOrDefault(p.Id) }).ToList(),
+                    (extras.GetValueOrDefault(r.GetGuid(0)) ?? []).Select(p => p with { Clientes = ConFirmasDe(r.GetGuid(0), p.Id, p.Clientes), Atencion = atencionSanitarios.GetValueOrDefault(p.Id), Terminada = paradasTerminadas.ContainsKey(p.Id), NoNecesarias = paradasTerminadas.GetValueOrDefault(p.Id), Reportada = paradasReportadas.Contains(p.Id), OrdenesNoNecesarias = ordenesNoNecesarias.GetValueOrDefault(p.Id) }).ToList(),
                     r.GetBoolean(10)));
         // «No se hará hoy» vigente del día pedido (ruta y paradas); en rangos no aplica.
         if (fecha is { } diaNsh && !rango)
