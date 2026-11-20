@@ -1,0 +1,10 @@
+[Unit]
+Description=Respaldo diario de Manifiestos (hora de México, de madrugada)
+
+[Timer]
+OnCalendar=*-*-* 03:30:00 America/Monterrey
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

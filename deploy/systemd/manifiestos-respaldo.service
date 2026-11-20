@@ -1,0 +1,11 @@
+[Unit]
+Description=Respaldo diario de Manifiestos (base, archivos, claves y secretos)
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/manifiestos/backend/deploy
+EnvironmentFile=/etc/manifiestos/respaldo.env
+ExecStart=/bin/bash scripts/respaldo-diario.sh
+Nice=10
