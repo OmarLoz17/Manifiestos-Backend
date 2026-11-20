@@ -228,7 +228,7 @@ public sealed class RepositorioOrdenes(NpgsqlDataSource datos) : IRepositorioOrd
             await using var cmd = tx.Comando("""
                 SELECT DISTINCT i.parada_id FROM negocio.incidencia i
                 WHERE i.organizacion_id = $1 AND i.parada_id IS NOT NULL AND i.ocurrida_en >= $2::date AND i.ocurrida_en < $2::date + 1
-                  AND coalesce(i.descripcion, '') NOT LIKE 'Aviso automático%'
+                  AND NOT i.automatica AND coalesce(i.descripcion, '') NOT LIKE 'Aviso automático%' AND NOT (i.motivo = 'servicio_parcial' AND coalesce(i.descripcion, '') LIKE 'Se atendieron % de % baños.' AND i.ocurrida_en < timestamptz '2026-11-20 00:00-06')
                   AND coalesce((SELECT s.estatus FROM negocio.seguimiento_incidencia s WHERE (s.organizacion_id, s.sucursal_id, s.incidencia_id) = (i.organizacion_id, i.sucursal_id, i.id)
                                 ORDER BY s.revision DESC LIMIT 1), 'abierta') <> 'cerrada'
                 """, organizacion, diaR);

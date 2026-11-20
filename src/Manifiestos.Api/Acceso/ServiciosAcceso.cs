@@ -17,6 +17,8 @@ namespace Manifiestos.Api.Acceso;
 public static class ServiciosAcceso
 {
     public const string ClaimAcceso = "manifiestos:acceso";
+    /// <summary>Identificador de la sesión web que el servidor puede revocar (cerrar sesión la invalida aunque alguien conserve la cookie).</summary>
+    public const string ClaimSesionWeb = "manifiestos:sesion-web";
     public const string ClaimOrganizacion = "manifiestos:organizacion";
     public const string PoliticaLogin = "login";
     /// <summary>Renovar sesión móvil: el refresh token es secreto y no adivinable, así que no hace falta frenarlo como a un login; el límite solo protege la base.</summary>
@@ -129,11 +131,12 @@ public static class ServiciosAcceso
         return new NpgsqlConnectionStringBuilder(cadena) { Database = baseDatos.Trim() }.ConnectionString;
     }
 
-    public static ClaimsPrincipal CrearPrincipal(Guid organizacion, Guid acceso, string nombre) => new(
+    public static ClaimsPrincipal CrearPrincipal(Guid organizacion, Guid acceso, string nombre, Guid sesionWeb) => new(
         new ClaimsIdentity(
         [
             new Claim(ClaimTypes.NameIdentifier, acceso.ToString()),
             new Claim(ClaimAcceso, acceso.ToString()),
+            new Claim(ClaimSesionWeb, sesionWeb.ToString()),
             new Claim(ClaimOrganizacion, organizacion.ToString()),
             new Claim(ClaimTypes.Name, nombre),
         ], CookieAuthenticationDefaults.AuthenticationScheme));
@@ -153,8 +156,11 @@ public static class ServiciosAcceso
         SesionVigente? sesion = null;
         if (LeerIds(c.Principal, out var org, out var acceso) && org == config.OrganizacionId)
         {
-            sesion = await http.RequestServices.GetRequiredService<IRepositorioAcceso>()
-                .ObtenerSesionAsync(org, acceso, http.RequestAborted);
+            var repositorio = http.RequestServices.GetRequiredService<IRepositorioAcceso>();
+            // La cookie debe traer una sesión que el servidor todavía tenga abierta (las anteriores a este cambio no la traen y se rechazan).
+            if (Guid.TryParse(c.Principal?.FindFirstValue(ClaimSesionWeb), out var sesionWeb)
+                && await repositorio.SesionWebVigenteAsync(org, sesionWeb, acceso, http.RequestAborted))
+                sesion = await repositorio.ObtenerSesionAsync(org, acceso, http.RequestAborted);
         }
         if (sesion is null)
         {

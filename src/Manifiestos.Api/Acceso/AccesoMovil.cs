@@ -283,12 +283,15 @@ public static class AccesoMovil
             if (esperado.Recibida) return Results.Ok(new { estado="recibida",id });   // reintento: no se vuelve a leer ni a guardar
             var mime=(http.Request.ContentType??"").Split(';')[0].Trim().ToLowerInvariant();
             if (mime is not ("image/jpeg" or "image/png")) return Results.Json(new MensajeError("Tipo de archivo no permitido."),statusCode:415);
+            // El tipo debe corresponder al rol de la evidencia: la foto es JPEG y las firmas son PNG.
+            if (ValidadorImagen.MimeDelRol(esperado.Rol)!=mime) return Results.Json(new MensajeError("El tipo de archivo no corresponde a la evidencia."),statusCode:422);
             // Tope de tamaño propio (no el declarado por el cliente): una foto optimizada pesa ~0.5 MB; la firma (PNG), decenas de KB. Configurable.
             var tope=mime=="image/png" ? config.GetValue("Archivos:MaxFirmaBytes",512*1024L) : config.GetValue("Archivos:MaxFotoBytes",2*1024*1024L);
             if (esperado.Tamano>tope) return Results.Json(new MensajeError("El archivo es demasiado grande."),statusCode:413);
             var raiz=config["Archivos:Ruta"] ?? (entorno.IsDevelopment() ? Path.GetFullPath(Path.Combine(entorno.ContentRootPath,"..","..",".local","archivos")) : null);
             if (raiz is null) return Results.Json(new MensajeError("El almacenamiento de archivos no está configurado."),statusCode:503);
-            var relativa=Path.Combine(org.ToString("N"),id.ToString("N")[..2],id.ToString("N")+(mime=="image/png"?".png":".jpg"));
+            // La clave física lleva todo el ámbito de la identidad (organización, sucursal e id): un mismo id en otra sucursal no puede chocar.
+            var relativa=Path.Combine(org.ToString("N"),c.SucursalId.ToString("N"),id.ToString("N")[..2],id.ToString("N")+(mime=="image/png"?".png":".jpg"));
             var destino=Path.Combine(raiz,relativa); Directory.CreateDirectory(Path.GetDirectoryName(destino)!);
             var temporal=destino+".parcial-"+Guid.NewGuid().ToString("N");
             try {
@@ -304,8 +307,8 @@ public static class AccesoMovil
                 }
                 if (total!=esperado.Tamano || !hash.GetHashAndReset().AsSpan().SequenceEqual(esperado.Sha256))
                     return Results.Json(new MensajeError("El archivo no coincide con lo declarado."),statusCode:422);
-                // El tipo se comprueba por el CONTENIDO (primeros bytes), no por el encabezado que manda el cliente. No se procesa ni se recomprime la imagen.
-                if (!EsImagenDelTipo(temporal,mime)) return Results.Json(new MensajeError("El archivo no es una imagen del tipo declarado."),statusCode:422);
+                // El tipo se comprueba por el CONTENIDO: estructura completa, dimensiones y datos decodificables, no solo la firma ni el encabezado del cliente.
+                if (!ValidadorImagen.Valida(temporal,mime)) return Results.Json(new MensajeError("El archivo no es una imagen del tipo declarado."),statusCode:422);
                 // Idempotente ante reintentos concurrentes: el archivo ya fue verificado (tamaño y SHA-256 contra lo declarado), así que si otra
                 // solicitud lo dejó primero en su lugar, el contenido es el mismo y no se sobrescribe. File.Move sin sobrescribir es atómico: el
                 // perdedor de la carrera recibe IOException y solo descarta su copia temporal.
@@ -317,14 +320,6 @@ public static class AccesoMovil
             catch (PostgresException e) when (e.SqlState=="42501") { return Rechazo(); }
             finally { try { if (File.Exists(temporal)) File.Delete(temporal); } catch (IOException) { /* queda para limpieza; nunca borra evidencia ya verificada */ } }
         }).RequireAuthorization(Politica);
-    }
-    /// <summary>Firma de archivo: JPEG empieza con FF D8 FF; PNG con 89 50 4E 47 0D 0A 1A 0A.</summary>
-    internal static bool EsImagenDelTipo(string ruta,string mime) {
-        Span<byte> cabecera=stackalloc byte[8];
-        using var f=new FileStream(ruta,FileMode.Open,FileAccess.Read,FileShare.Read);
-        var n=f.Read(cabecera);
-        return mime=="image/png" ? n==8 && cabecera.SequenceEqual(new byte[]{0x89,0x50,0x4E,0x47,0x0D,0x0A,0x1A,0x0A})
-            : n>=3 && cabecera[0]==0xFF && cabecera[1]==0xD8 && cabecera[2]==0xFF;
     }
     private static IResult Rechazo() => Results.Json(new MensajeError(EndpointsAcceso.MensajeNoAutorizada),statusCode:403);
     private static IResult Emitir(Guid org,Guid sesion) => Results.SignIn(new ClaimsPrincipal(new ClaimsIdentity([

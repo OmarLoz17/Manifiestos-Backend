@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Antiforgery;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.Extensions.Options;
+using System.Security.Claims;
 
 namespace Manifiestos.Api.Acceso;
 
@@ -36,8 +37,12 @@ public static class EndpointsAcceso
 
         g.MapGet("/me", ObtenerUsuarioAsync);
 
-        g.MapPost("/logout", async (HttpContext http) =>
+        g.MapPost("/logout", async (HttpContext http, IRepositorioAcceso repositorio) =>
         {
+            // Primero se revoca en el servidor (la copia de la cookie deja de servir) y después se borra la cookie de este navegador.
+            if (ServiciosAcceso.LeerIds(http.User, out var orgSalida, out var accesoSalida)
+                && Guid.TryParse(http.User.FindFirstValue(ServiciosAcceso.ClaimSesionWeb), out var sesionSalida))
+                await repositorio.CerrarSesionWebAsync(orgSalida, sesionSalida, accesoSalida, http.RequestAborted);
             await http.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme);
             return Results.NoContent();
         }).AllowAnonymous().AddEndpointFilter(ValidarCsrf);
@@ -70,7 +75,7 @@ public static class EndpointsAcceso
 
         var nombre = string.IsNullOrWhiteSpace(identidad.Nombre) ? identidad.Correo : identidad.Nombre.Trim();
         await http.SignInAsync(CookieAuthenticationDefaults.AuthenticationScheme,
-            ServiciosAcceso.CrearPrincipal(org, resultado.AccesoId!.Value, nombre));
+            ServiciosAcceso.CrearPrincipal(org, resultado.AccesoId!.Value, nombre, await repositorio.AbrirSesionWebAsync(org, resultado.AccesoId.Value, ct)));
         return Results.NoContent();
     }
 

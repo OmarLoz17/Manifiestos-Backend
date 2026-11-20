@@ -217,6 +217,15 @@ public sealed class CapturasMovilTests(BaseDatosPrueba bd) : IClassFixture<BaseD
             planta: new { id = "pta-1", nombre = "PTAR Ficticia" }, orden: o.Ordenes[cual], jornada: o.Jornada, requiereCliente: requiereCliente),
     });
 
+    /// <summary>Simula la llegada de los archivos de una orden: da por recibida toda su evidencia pendiente (la subida HTTP se prueba aparte). El manifiesto solo se arma con todos los archivos recibidos.</summary>
+    private async Task RecibirArchivosAsync(Sesion s, Guid orden)
+    {
+        var ids = (await bd.ConsultarAsync($"SELECT coalesce(string_agg(e.id::text, ','), '') FROM negocio.evidencia_captura e JOIN negocio.captura_trabajo t ON (t.organizacion_id,t.sucursal_id,t.captura_id)=(e.organizacion_id,e.sucursal_id,e.captura_id) WHERE t.orden_derivada_id='{orden}' AND e.archivo_id IS NULL"))
+            .Split(',', StringSplitOptions.RemoveEmptyEntries);
+        foreach (var id in ids)
+            await bd.SqlComoDuenoAsync($"SELECT sync.registrar_archivo('{Org}', (SELECT id FROM seguridad.acceso_autorizado WHERE correo_permitido='{s.Equipo.Correo}'), '{s.Equipo.Instalacion}', '{id}', 'image/png', 'prueba/{id}')");
+    }
+
     private async Task<string> ManifiestosDeAsync(Guid orden) =>
         await bd.ConsultarAsync($"SELECT count(*) FROM negocio.orden_manifiesto WHERE orden_derivada_id='{orden}'");
 
@@ -229,11 +238,14 @@ public sealed class CapturasMovilTests(BaseDatosPrueba bd) : IClassFixture<BaseD
             var r = await PasoAsync(s, o, 0, paso);
             Assert.Equal(HttpStatusCode.OK, r.StatusCode);
             Assert.DoesNotContain("manifiesto", (await r.Content.ReadAsStringAsync()).ToLowerInvariant());
+            await RecibirArchivosAsync(s, o.Ordenes[0]);
             Assert.Equal("0", await ManifiestosDeAsync(o.Ordenes[0]));      // faltan firma y nombre en la planta
         }
         var ultima = await PasoAsync(s, o, 0, "planta");
         Assert.Equal(HttpStatusCode.OK, ultima.StatusCode);
         Assert.DoesNotContain("manifiesto", (await ultima.Content.ReadAsStringAsync()).ToLowerInvariant());
+        Assert.Equal("0", await ManifiestosDeAsync(o.Ordenes[0]));          // H03: con el sobre no basta; faltan los archivos de la planta
+        await RecibirArchivosAsync(s, o.Ordenes[0]);
         Assert.Equal("1", await ManifiestosDeAsync(o.Ordenes[0]));
         Assert.Equal("0", await ManifiestosDeAsync(o.Ordenes[1]));          // la segunda vuelta es otra orden y otro manifiesto
         // Un envío repetido de la planta (otro UUID) no duplica el manifiesto.
@@ -246,13 +258,25 @@ public sealed class CapturasMovilTests(BaseDatosPrueba bd) : IClassFixture<BaseD
         var folio1 = await bd.ConsultarAsync($"SELECT numero_manifiesto FROM negocio.version_manifiesto WHERE manifiesto_id='{m}'");
         Assert.Matches(@"^\d{3}/" + DateTime.UtcNow.Year + "$", folio1);
         // Segunda orden: completa sus propios pasos y obtiene su propio manifiesto, en otro orden de llegada.
-        foreach (var paso in new[] { "planta", "servicio", "cliente" }) Assert.Equal(HttpStatusCode.OK, (await PasoAsync(s, o, 1, paso)).StatusCode);
+        foreach (var paso in new[] { "planta", "servicio", "cliente" }) { Assert.Equal(HttpStatusCode.OK, (await PasoAsync(s, o, 1, paso)).StatusCode); await RecibirArchivosAsync(s, o.Ordenes[1]); }
         Assert.Equal("1", await ManifiestosDeAsync(o.Ordenes[1]));
         var m2 = await bd.ConsultarAsync($"SELECT manifiesto_id FROM negocio.orden_manifiesto WHERE orden_derivada_id='{o.Ordenes[1]}'");
         Assert.NotEqual(m, m2);
         // Folio consecutivo: el de la segunda orden es el siguiente al de la primera.
         var folio2 = await bd.ConsultarAsync($"SELECT numero_manifiesto FROM negocio.version_manifiesto WHERE manifiesto_id='{m2}'");
         Assert.Equal(int.Parse(folio1[..3]) + 1, int.Parse(folio2[..3]));
+    }
+
+    [Fact]
+    public async Task Fosa_fija_no_se_arma_sin_la_firma_del_cliente_aunque_todo_lo_demas_este_recibido()
+    {
+        var s = await SesionAsync(); var o = await OrdenesAsync(s, fosas: 1, autorizado: true);
+        foreach (var paso in new[] { "servicio", "planta" }) { Assert.Equal(HttpStatusCode.OK, (await PasoAsync(s, o, 0, paso)).StatusCode); await RecibirArchivosAsync(s, o.Ordenes[0]); }
+        Assert.Equal("0", await ManifiestosDeAsync(o.Ordenes[0]));          // el cliente autorizado es el generador: su firma es requisito
+        Assert.Equal(HttpStatusCode.OK, (await PasoAsync(s, o, 0, "cliente")).StatusCode);
+        Assert.Equal("0", await ManifiestosDeAsync(o.Ordenes[0]));          // la firma llegó en el sobre, pero su archivo todavía no
+        await RecibirArchivosAsync(s, o.Ordenes[0]);
+        Assert.Equal("1", await ManifiestosDeAsync(o.Ordenes[0]));
     }
 
     [Theory]
@@ -376,7 +400,7 @@ public sealed class CapturasMovilTests(BaseDatosPrueba bd) : IClassFixture<BaseD
     public async Task Varias_subidas_simultaneas_de_la_misma_evidencia_responden_bien_y_dejan_un_solo_archivo()
     {
         var s = await SesionAsync(); var foto = Guid.NewGuid();
-        var bytes = new byte[1_900_000]; new Random(7).NextBytes(bytes); bytes[0] = 0xFF; bytes[1] = 0xD8; bytes[2] = 0xFF;   // grande (bajo el tope): amplía la ventana de la carrera
+        var bytes = ImagenesDePrueba.Jpeg(7, relleno: 1_900_000);   // grande (bajo el tope): amplía la ventana de la carrera
         Assert.Equal(HttpStatusCode.OK, (await EnviarAsync(s.Http, Sobre(s, Guid.NewGuid(), evidencias: [FotoReal(foto, bytes)]))).StatusCode);
         var respuestas = await Task.WhenAll(Enumerable.Range(0, 8).Select(_ => SubirAsync(s.Http, foto, bytes)));
         Assert.All(respuestas, r => Assert.Equal(HttpStatusCode.OK, r.StatusCode));   // antes, el perdedor de la carrera recibía 500
@@ -390,7 +414,7 @@ public sealed class CapturasMovilTests(BaseDatosPrueba bd) : IClassFixture<BaseD
     [Fact]
     public async Task Drive_en_segundo_plano_archiva_lo_recibido_reintenta_si_falla_y_no_duplica()
     {
-        var s = await SesionAsync(); var foto = Guid.NewGuid(); byte[] bytes = [0xFF, 0xD8, 0xFF, 4];
+        var s = await SesionAsync(); var foto = Guid.NewGuid(); byte[] bytes = ImagenesDePrueba.Jpeg(4);
         Assert.Equal(HttpStatusCode.OK, (await EnviarAsync(s.Http, Sobre(s, Guid.NewGuid(), evidencias: [FotoReal(foto, bytes)]))).StatusCode);
         Assert.Equal(HttpStatusCode.OK, (await SubirAsync(s.Http, foto, bytes)).StatusCode);   // el operador ya terminó: no esperó a Drive
         var proceso = _api.Services.GetRequiredService<Manifiestos.Api.Archivos.ProcesoSubidaDrive>();
@@ -419,15 +443,23 @@ public sealed class CapturasMovilTests(BaseDatosPrueba bd) : IClassFixture<BaseD
         // El encabezado dice JPEG y el tamaño y la huella coinciden con lo declarado, pero el contenido no es una imagen: se rechaza sin guardar nada.
         var falsa = Guid.NewGuid(); byte[] texto = System.Text.Encoding.UTF8.GetBytes("<script>alert(1)</script>");
         // Un PNG declarado como JPEG (y al revés) tampoco pasa: la firma debe corresponder al tipo.
-        var png = Guid.NewGuid(); byte[] bytesPng = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 1];
+        var png = Guid.NewGuid(); byte[] bytesPng = ImagenesDePrueba.Png(1);
         // Más grande que el tope de una foto (2 MB), con firma válida.
-        var grande = Guid.NewGuid(); var enorme = new byte[2_200_000]; new Random(3).NextBytes(enorme); enorme[0] = 0xFF; enorme[1] = 0xD8; enorme[2] = 0xFF;
+        var grande = Guid.NewGuid(); var enorme = ImagenesDePrueba.Jpeg(3, relleno: 2_200_000);
         Assert.Equal(HttpStatusCode.OK, (await EnviarAsync(s.Http, Sobre(s, id, evidencias: [FotoReal(falsa, texto), FirmaReal(png, "FIRMA_OPERADOR", bytesPng), FotoReal(grande, enorme)]))).StatusCode);
         Assert.Equal(HttpStatusCode.UnprocessableEntity, (await SubirAsync(s.Http, falsa, texto)).StatusCode);
         Assert.Equal(HttpStatusCode.UnprocessableEntity, (await SubirAsync(s.Http, png, bytesPng, "image/jpeg")).StatusCode);
         Assert.Equal(HttpStatusCode.RequestEntityTooLarge, (await SubirAsync(s.Http, grande, enorme)).StatusCode);
         Assert.Equal("0", await bd.ConsultarAsync($"SELECT count(*) FROM negocio.archivo WHERE id IN ('{falsa}','{png}','{grande}')"));
         Assert.Empty(Directory.Exists(_api.RutaArchivos) ? Directory.GetFiles(_api.RutaArchivos, "*", SearchOption.AllDirectories) : []);
+        // H21: una imagen truncada, un PNG con la suma de verificación mala y un PNG enviado como foto (tipo que no corresponde al rol) también se rechazan.
+        var truncada = Guid.NewGuid(); var jpegTruncado = ImagenesDePrueba.Jpeg(11)[..^2];
+        var crcMalo = Guid.NewGuid(); var pngMalo = ImagenesDePrueba.Png(12, crcMalo: true);
+        var pngComoFoto = Guid.NewGuid(); var pngBueno = ImagenesDePrueba.Png(13);
+        Assert.Equal(HttpStatusCode.OK, (await EnviarAsync(s.Http, Sobre(s, Guid.NewGuid(), evidencias: [FotoReal(truncada, jpegTruncado), FirmaReal(crcMalo, "FIRMA_OPERADOR", pngMalo), FotoReal(pngComoFoto, pngBueno)]))).StatusCode);
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, (await SubirAsync(s.Http, truncada, jpegTruncado)).StatusCode);
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, (await SubirAsync(s.Http, crcMalo, pngMalo, "image/png")).StatusCode);
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, (await SubirAsync(s.Http, pngComoFoto, pngBueno, "image/png")).StatusCode);
         // La firma PNG correcta sí se acepta con su tipo.
         Assert.Equal(HttpStatusCode.OK, (await SubirAsync(s.Http, png, bytesPng, "image/png")).StatusCode);
     }
@@ -436,7 +468,7 @@ public sealed class CapturasMovilTests(BaseDatosPrueba bd) : IClassFixture<BaseD
     public async Task Sube_el_archivo_verificado_lo_guarda_en_el_vps_encola_drive_y_es_idempotente()
     {
         var s = await SesionAsync(); var foto = Guid.NewGuid(); var firma = Guid.NewGuid();
-        byte[] bytesFoto = [0xFF, 0xD8, 0xFF, 4, 5, 6, 7, 8], bytesFirma = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 9];
+        var bytesFoto = ImagenesDePrueba.Jpeg(5); var bytesFirma = ImagenesDePrueba.Png(9);
         var id = Guid.NewGuid();
         Assert.Equal(HttpStatusCode.OK, (await EnviarAsync(s.Http, Sobre(s, id, evidencias: [FotoReal(foto, bytesFoto), FirmaReal(firma, "FIRMA_OPERADOR", bytesFirma)]))).StatusCode);
 
@@ -465,7 +497,7 @@ public sealed class CapturasMovilTests(BaseDatosPrueba bd) : IClassFixture<BaseD
     [Fact]
     public async Task Otro_operador_no_puede_subir_ni_ver_las_evidencias_ajenas()
     {
-        var a = await SesionAsync(); var b = await SesionAsync(); var foto = Guid.NewGuid(); byte[] bytes = [0xFF, 0xD8, 0xFF];
+        var a = await SesionAsync(); var b = await SesionAsync(); var foto = Guid.NewGuid(); byte[] bytes = ImagenesDePrueba.Jpeg(0);
         Assert.Equal(HttpStatusCode.OK, (await EnviarAsync(a.Http, Sobre(a, Guid.NewGuid(), evidencias: [FotoReal(foto, bytes), FirmaReal(Guid.NewGuid(), "FIRMA_OPERADOR", [4])]))).StatusCode);
         Assert.Equal(HttpStatusCode.NotFound, (await SubirAsync(b.Http, foto, bytes)).StatusCode);
         Assert.Equal(HttpStatusCode.NotFound, (await SubirAsync(a.Http, Guid.NewGuid(), bytes)).StatusCode);
@@ -477,7 +509,7 @@ public sealed class CapturasMovilTests(BaseDatosPrueba bd) : IClassFixture<BaseD
     public async Task La_foto_de_un_problema_crea_un_aviso_de_incidencia_una_sola_vez()
     {
         var s = await SesionAsync(); var o = await OrdenesAsync(s, fosas: 1, autorizado: true);
-        var foto = Guid.NewGuid(); byte[] bytes = [0xFF, 0xD8, 0xFF, 7]; var captura = Guid.NewGuid();
+        var foto = Guid.NewGuid(); byte[] bytes = ImagenesDePrueba.Jpeg(7); var captura = Guid.NewGuid();
         var sobre = Sobre(s, captura, "PROBLEMA", evidencias: [FotoReal(foto, bytes)], problema: new { motivo = "cliente_ausente", comentario = "Nadie abrió" },
             orden: o.Ordenes[0], jornada: o.Jornada);
         Assert.Equal(HttpStatusCode.OK, (await EnviarAsync(s.Http, sobre)).StatusCode);

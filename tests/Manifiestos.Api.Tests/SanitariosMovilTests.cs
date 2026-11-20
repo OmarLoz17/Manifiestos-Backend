@@ -521,7 +521,7 @@ public sealed class SanitariosMovilTests(BaseDatosPrueba bd) : IClassFixture<Bas
     public async Task Problema_por_parada_se_acepta_sin_cerrar_nada_y_su_foto_crea_incidencia_de_sanitario()
     {
         var s = await SesionAsync(); var e = await EscenarioAsync(s);
-        var foto = Guid.NewGuid(); byte[] bytes = [0xFF, 0xD8, 0xFF, 3]; var captura = Guid.NewGuid();
+        var foto = Guid.NewGuid(); byte[] bytes = ImagenesDePrueba.Jpeg(3); var captura = Guid.NewGuid();
         var sobre = Sobre(s, captura, "PROBLEMA", e.ParadaA, e.Jornada, "{\"dato\":\"sintetico\"}",
             [new { id = foto, rol = "FOTO", sha256 = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(bytes)), tamano = bytes.Length,
                 ubicacion = new { latitud = 25.6, longitud = -100.3, precisionMetros = 9.0, fechaEpochMs = Ahora() } }],

@@ -159,6 +159,22 @@ public sealed class AccesoWebTests : IClassFixture<BaseDatosPrueba>, IAsyncLifet
     }
 
     [Fact]
+    public async Task Cerrar_sesion_revoca_en_el_servidor_y_una_copia_de_la_cookie_deja_de_servir()
+    {
+        var correo = Correo("copia");
+        await _bd.AutorizarAsync(correo);
+        var nav = _api.NuevoNavegador();
+        var entrada = await nav.EntrarAsync(ValidadorFicticio.Token("s-" + Guid.NewGuid().ToString("N"), correo));
+        Assert.Equal(HttpStatusCode.NoContent, entrada.StatusCode);
+        var cookie = entrada.Headers.GetValues("Set-Cookie").Single(x => x.StartsWith("manifiestos.sesion=")).Split(';')[0];
+        var copia = _api.NuevoNavegador(); copia.DefaultRequestHeaders.Add("Cookie", cookie);   // alguien conservó la cookie
+        Assert.Equal(HttpStatusCode.OK, (await copia.GetAsync("/api/auth/me")).StatusCode);
+
+        Assert.Equal(HttpStatusCode.NoContent, (await nav.SalirAsync()).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await copia.GetAsync("/api/auth/me")).StatusCode);   // revocada en el servidor, no solo borrada en el navegador
+    }
+
+    [Fact]
     public async Task La_cookie_de_sesion_es_HttpOnly_Secure_y_SameSite_Strict()
     {
         var correo = Correo("cookie");

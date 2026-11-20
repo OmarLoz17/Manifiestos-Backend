@@ -109,10 +109,10 @@ SELECT pg_temp.afirmar((SELECT banos=50 AND m3=0.800 AND capacidad_m3=1.000 AND 
   '50 baños = 0.800 m3 = 80 %, con succiones de dos días y de dos rutas de la misma unidad');
 SELECT pg_temp.afirmar((SELECT count(*)=2 FROM negocio.succion_parada WHERE vehiculo_id=pg_temp.uid('vsan')),'ambas rutas alimentan la misma unidad');
 -- (0055) Menos baños de los asignados -> una incidencia automática «servicio_parcial» por captura; completos o de más no generan aviso.
-SELECT pg_temp.afirmar((SELECT count(*) FROM negocio.incidencia i WHERE i.motivo='servicio_parcial' AND i.descripcion LIKE 'Aviso automático%')
+SELECT pg_temp.afirmar((SELECT count(*) FROM negocio.incidencia i WHERE i.motivo='servicio_parcial' AND i.descripcion LIKE 'Se atendieron % de % baños.')
     = (SELECT count(*) FROM negocio.succion_parada s WHERE s.banos_succionados<s.banos_asignados),'una incidencia automática por cada captura con baños incompletos');
 SELECT pg_temp.afirmar(NOT EXISTS (SELECT 1 FROM negocio.incidencia i JOIN negocio.succion_parada s ON s.parada_id=i.parada_id AND s.fecha_captura=i.ocurrida_en
-    WHERE i.motivo='servicio_parcial' AND i.descripcion LIKE 'Aviso automático%' AND (i.banos_atendidos IS DISTINCT FROM s.banos_succionados OR i.banos_asignados IS DISTINCT FROM s.banos_asignados)),'la incidencia automática lleva asignados y atendidos');
+    WHERE i.motivo='servicio_parcial' AND i.descripcion LIKE 'Se atendieron % de % baños.' AND (i.banos_atendidos IS DISTINCT FROM s.banos_succionados OR i.banos_asignados IS DISTINCT FROM s.banos_asignados)),'la incidencia automática lleva asignados y atendidos');
 SELECT pg_temp.succion('c3','j1','pb',16,now()-interval '2 hours');
 SELECT pg_temp.afirmar((SELECT banos=66 AND m3=1.056 AND porcentaje=105.6 FROM pg_temp.carga('vsan')),'sin tope: 66 baños = 1.056 m3 = 105.6 %');
 SELECT pg_temp.afirmar((SELECT banos=0 AND m3=0 FROM pg_temp.carga('vsan2')),'otra unidad no ve esa carga');
@@ -339,22 +339,33 @@ ROLLBACK;
 
 -- 20. (0056) «Terminar parada» llega al servidor: registra solo cambios de estado, reabrir es otra revisión y una jornada ajena se ignora.
 BEGIN;
+INSERT INTO negocio.parada_version(organizacion_id,sucursal_id,id,parada_id,revision,sitio_id) VALUES (pg_temp.uid('o'),pg_temp.uid('s'),pg_temp.uid('pvc2'),pg_temp.uid('pc'),2,pg_temp.uid('c3'));
+INSERT INTO negocio.parada_cliente(organizacion_id,sucursal_id,version_id,cliente_id,banos_planeados,fosas_planeadas) VALUES (pg_temp.uid('o'),pg_temp.uid('s'),pg_temp.uid('pvc2'),pg_temp.uid('c'),8,3);
 CREATE FUNCTION pg_temp.terminar(j uuid, t boolean) RETURNS integer LANGUAGE sql AS $$
     SELECT seguridad.registrar_paradas_terminadas(pg_temp.uid('o'),pg_temp.uid('a'),pg_temp.uid('i'),
-        jsonb_build_object('paradas',jsonb_build_array(jsonb_build_object('jornadaId',j,'paradaId',pg_temp.uid('pa'),'terminada',t)))) $$;
+        jsonb_build_object('paradas',jsonb_build_array(jsonb_build_object('jornadaId',j,'paradaId',pg_temp.uid('pc'),'terminada',t)))) $$;
 SELECT pg_temp.afirmar(pg_temp.terminar(pg_temp.uid('j2'),true)=1,'terminar una parada registra una revisión');
 SELECT pg_temp.afirmar(pg_temp.terminar(pg_temp.uid('j2'),true)=0,'repetir el mismo estado no registra nada (idempotente)');
 SELECT pg_temp.afirmar(pg_temp.terminar(pg_temp.uid('j2'),false)=1,'reabrir es otra revisión');
-SELECT pg_temp.afirmar((SELECT count(*)=2 AND max(revision)=2 FROM negocio.parada_terminada_dia WHERE parada_id=pg_temp.uid('pa')),'el historial conserva las dos revisiones');
+SELECT pg_temp.afirmar((SELECT count(*)=2 AND max(revision)=2 FROM negocio.parada_terminada_dia WHERE parada_id=pg_temp.uid('pc')),'el historial conserva las dos revisiones');
 SELECT pg_temp.afirmar(pg_temp.terminar(gen_random_uuid(),true)=0,'una jornada que no es de la sucursal se ignora');
 -- (0057) Se recuerda cuántas órdenes no se necesitaron: un cambio de ese número es otra revisión (si se agrega una orden y se vuelve a terminar).
 CREATE FUNCTION pg_temp.terminar_k(j uuid, t boolean, k integer) RETURNS integer LANGUAGE sql AS $$
     SELECT seguridad.registrar_paradas_terminadas(pg_temp.uid('o'),pg_temp.uid('a'),pg_temp.uid('i'),
-        jsonb_build_object('paradas',jsonb_build_array(jsonb_build_object('jornadaId',j,'paradaId',pg_temp.uid('pa'),'terminada',t,'noNecesarias',k)))) $$;
+        jsonb_build_object('paradas',jsonb_build_array(jsonb_build_object('jornadaId',j,'paradaId',pg_temp.uid('pc'),'terminada',t,'noNecesarias',k)))) $$;
 SELECT pg_temp.afirmar(pg_temp.terminar_k(pg_temp.uid('j2'),true,1)=1,'terminar con 1 orden no necesaria registra una revisión');
 SELECT pg_temp.afirmar(pg_temp.terminar_k(pg_temp.uid('j2'),true,1)=0,'repetir lo mismo no registra nada');
 SELECT pg_temp.afirmar(pg_temp.terminar_k(pg_temp.uid('j2'),true,2)=1,'terminar otra vez con 2 no necesarias es otra revisión');
-SELECT pg_temp.afirmar((SELECT no_necesarias=2 FROM negocio.parada_terminada_dia WHERE parada_id=pg_temp.uid('pa') ORDER BY revision DESC LIMIT 1),'la última revisión guarda el número de órdenes no necesarias');
+SELECT pg_temp.afirmar((SELECT no_necesarias=2 FROM negocio.parada_terminada_dia WHERE parada_id=pg_temp.uid('pc') ORDER BY revision DESC LIMIT 1),'la última revisión guarda el número de órdenes no necesarias');
+-- (0060, H01) El alcance del cierre: parada de otra ruta, conteo mayor que las órdenes y persona que ya no opera la unidad se ignoran.
+SELECT pg_temp.afirmar(seguridad.registrar_paradas_terminadas(pg_temp.uid('o'),pg_temp.uid('a'),pg_temp.uid('i'),
+    jsonb_build_object('paradas',jsonb_build_array(jsonb_build_object('jornadaId',pg_temp.uid('j2'),'paradaId',pg_temp.uid('pa'),'terminada',true))))=0,'una parada de otra ruta no se cierra con esta jornada');
+SELECT pg_temp.afirmar(pg_temp.terminar_k(pg_temp.uid('j2'),true,4)=0,'un conteo de no necesarias mayor que las órdenes de la parada se ignora');
+INSERT INTO negocio.cambio_unidad_dia(organizacion_id,sucursal_id,ruta_id,fecha,revision,vehiculo_id,persona_id)
+VALUES (pg_temp.uid('o'),pg_temp.uid('s'),pg_temp.uid('r2'),current_date,1,pg_temp.uid('vsan'),pg_temp.uid('p2'));
+SELECT pg_temp.afirmar(pg_temp.terminar_k(pg_temp.uid('j2'),false,0)=0,'con el cambio del día a otra persona, el titular fijo ya no cierra la parada (H02)');
+SELECT pg_temp.afirmar(NOT negocio.persona_opera_unidad(pg_temp.uid('o'),pg_temp.uid('s'),pg_temp.uid('vsan'),pg_temp.uid('p1'),clock_timestamp()),'el titular fijo no opera la unidad si el cambio del día la dio a otra persona');
+SELECT pg_temp.afirmar(negocio.persona_opera_unidad(pg_temp.uid('o'),pg_temp.uid('s'),pg_temp.uid('vsan'),pg_temp.uid('p2'),clock_timestamp()),'la persona del cambio del día opera la unidad');
 SELECT pg_temp.rechaza($q$UPDATE negocio.parada_terminada_dia SET terminada=true$q$,'23514','parada_terminada_dia inmutable');
 ROLLBACK;
 

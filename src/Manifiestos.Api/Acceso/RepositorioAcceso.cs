@@ -16,6 +16,9 @@ public interface IRepositorioAcceso
 {
     Task<ResultadoInicio> IniciarSesionWebAsync(Guid organizacion, IdentidadGoogle identidad, CancellationToken ct);
     Task<SesionVigente?> ObtenerSesionAsync(Guid organizacion, Guid acceso, CancellationToken ct);
+    Task<Guid> AbrirSesionWebAsync(Guid organizacion, Guid acceso, CancellationToken ct);
+    Task CerrarSesionWebAsync(Guid organizacion, Guid sesion, Guid acceso, CancellationToken ct);
+    Task<bool> SesionWebVigenteAsync(Guid organizacion, Guid sesion, Guid acceso, CancellationToken ct);
     Task<IReadOnlyList<SucursalVisible>> ListarSucursalesAsync(Guid organizacion, Guid acceso, CancellationToken ct);
 }
 
@@ -46,6 +49,32 @@ public sealed class RepositorioAcceso(NpgsqlDataSource datos) : IRepositorioAcce
         cmd.Parameters.AddWithValue(acceso);
         await using var r = await cmd.ExecuteReaderAsync(ct);
         return await r.ReadAsync(ct) ? new SesionVigente(r.GetString(0), r.GetString(1), r.GetString(2)) : null;
+    }
+
+    public async Task<Guid> AbrirSesionWebAsync(Guid organizacion, Guid acceso, CancellationToken ct)
+    {
+        await using var cmd = datos.CreateCommand("SELECT seguridad.abrir_sesion_web($1, $2)");
+        cmd.Parameters.AddWithValue(organizacion);
+        cmd.Parameters.AddWithValue(acceso);
+        return (Guid)(await cmd.ExecuteScalarAsync(ct))!;
+    }
+
+    public async Task CerrarSesionWebAsync(Guid organizacion, Guid sesion, Guid acceso, CancellationToken ct)
+    {
+        await using var cmd = datos.CreateCommand("SELECT seguridad.cerrar_sesion_web($1, $2, $3)");
+        cmd.Parameters.AddWithValue(organizacion);
+        cmd.Parameters.AddWithValue(sesion);
+        cmd.Parameters.AddWithValue(acceso);
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task<bool> SesionWebVigenteAsync(Guid organizacion, Guid sesion, Guid acceso, CancellationToken ct)
+    {
+        await using var cmd = datos.CreateCommand("SELECT seguridad.sesion_web_vigente($1, $2, $3)");
+        cmd.Parameters.AddWithValue(organizacion);
+        cmd.Parameters.AddWithValue(sesion);
+        cmd.Parameters.AddWithValue(acceso);
+        return (bool)(await cmd.ExecuteScalarAsync(ct))!;
     }
 
     public async Task<IReadOnlyList<SucursalVisible>> ListarSucursalesAsync(Guid organizacion, Guid acceso, CancellationToken ct)

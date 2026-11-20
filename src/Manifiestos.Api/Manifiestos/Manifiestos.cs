@@ -37,8 +37,8 @@ public sealed record ManifiestoResumen(
 /// <summary>Archivo de evidencia de un manifiesto (foto o firma); se ve en el panel con GET /api/archivos/{id}.</summary>
 public sealed record EvidenciaManifiesto(Guid ArchivoId, string Rol, double? Latitud = null, double? Longitud = null, double? PrecisionM = null, string? Nombre = null);
 
-/// <summary>Firma precargada del generador (nuestra empresa) para clientes sin autorización; sin imagen mientras sea provisional.</summary>
-public sealed record FirmaPrecargadaManifiesto(string Nombre, bool Provisional);
+/// <summary>Firma precargada del generador (nuestra empresa) para clientes sin autorización; la imagen (ArchivoId) existe cuando ya no es provisional; se ve con GET /api/archivos/{id}.</summary>
+public sealed record FirmaPrecargadaManifiesto(string Nombre, bool Provisional, Guid? ArchivoId = null);
 
 public interface IRepositorioManifiestos
 {
@@ -151,11 +151,11 @@ public sealed class RepositorioManifiestos(NpgsqlDataSource datos) : IRepositori
 
         var precargadas = new Dictionary<Guid, FirmaPrecargadaManifiesto>();
         await using (var cmd = tx.Comando("""
-            SELECT DISTINCT ON (sucursal_id) sucursal_id, nombre_firmante, es_provisional FROM negocio.firma_generador_precargada
+            SELECT DISTINCT ON (sucursal_id) sucursal_id, nombre_firmante, es_provisional, archivo_id FROM negocio.firma_generador_precargada
             WHERE organizacion_id = $1 ORDER BY sucursal_id, vigente_desde DESC
             """, organizacion))
         await using (var r = await cmd.ExecuteReaderAsync(ct))
-            while (await r.ReadAsync(ct)) precargadas[r.GetGuid(0)] = new FirmaPrecargadaManifiesto(r.GetString(1), r.GetBoolean(2));
+            while (await r.ReadAsync(ct)) precargadas[r.GetGuid(0)] = new FirmaPrecargadaManifiesto(r.GetString(1), r.GetBoolean(2), r.IsDBNull(3) ? null : r.GetGuid(3));
 
         // Fosa fija: la orden queda descargada cuando quien recibe en la planta ya firmó (captura RECEPCION_PLANTA de la orden); no hay que esperar otro registro.
         var plantaFosaFija = new Dictionary<Guid, DescargaDeManifiesto>();
