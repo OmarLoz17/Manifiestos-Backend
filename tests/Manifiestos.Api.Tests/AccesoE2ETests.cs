@@ -14,7 +14,7 @@ namespace Manifiestos.Api.Tests;
 /// </summary>
 public sealed class AccesoE2ETests
 {
-    private sealed class ApiEnEntorno(string entorno, string? permitirTokensE2E) : WebApplicationFactory<Program>
+    private sealed class ApiEnEntorno(string entorno, string? permitirTokensE2E, bool conClaves = true, bool conLlave = true) : WebApplicationFactory<Program>
     {
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
@@ -23,6 +23,10 @@ public sealed class AccesoE2ETests
             builder.UseSetting("Acceso:GoogleClientId", "cliente-ficticio.apps.googleusercontent.com");
             builder.UseSetting("Acceso:OrganizacionId", Guid.NewGuid().ToString());
             if (permitirTokensE2E is not null) builder.UseSetting("Acceso:PermitirTokensE2E", permitirTokensE2E);
+            // Producción exige claves de sesión persistentes y la llave del QR al arrancar (ver Despliegue.cs).
+            if (conClaves) builder.UseSetting("DataProtection:Ruta", Path.Combine(Path.GetTempPath(), "manifiestos-pruebas-claves"));
+            if (conLlave) { using var e = System.Security.Cryptography.ECDsa.Create(System.Security.Cryptography.ECCurve.NamedCurves.nistP256); builder.UseSetting("Validacion:LlavePem", e.ExportPkcs8PrivateKeyPem()); }
+            else builder.UseSetting("Validacion:RutaLlave", Path.Combine(Path.GetTempPath(), "manifiestos-pruebas-sin-llave.pem"));
         }
     }
 
@@ -73,15 +77,27 @@ public sealed class AccesoE2ETests
         Assert.Equal("e2e:persona@example.invalid", id.Sujeto);
         Assert.True(id.CorreoVerificado);
         Assert.Equal("Persona E2E", id.Nombre);
+        Assert.Null(id.Nonce);
+        // La cuarta parte es el nonce del desafío móvil: así el ensayo de despliegue recorre el acceso del teléfono sin Google.
+        Assert.Equal("abc123", (await v.ValidarAsync("e2e|persona@example.invalid|Persona E2E|abc123", CancellationToken.None))!.Nonce);
 
         string[] rechazados =
         [
             "", "e2e", "e2e|persona@example.invalid", "e2e|persona@example.invalid|", "e2e|sin-arroba|Nombre",
             "E2E|persona@example.invalid|Nombre", "otro|persona@example.invalid|Nombre",
-            "s-1|persona@example.invalid|True|Nombre", "e2e|persona@example.invalid|Nombre|extra",
+            "s-1|persona@example.invalid|True|Nombre", "e2e|persona@example.invalid|Nombre|nonce|sobra",
             "eyJhbGciOiJSUzI1NiJ9.e30.firma", "e2e|" + new string('a', 600) + "@example.invalid|Nombre",
         ];
         foreach (var t in rechazados) Assert.Null(await v.ValidarAsync(t, CancellationToken.None));
+    }
+
+    [Fact]
+    public void En_produccion_faltar_las_claves_de_sesion_o_la_llave_del_QR_impide_arrancar()
+    {
+        using var sinClaves = new ApiEnEntorno("Production", null, conClaves: false);
+        Assert.Contains("DataProtection:Ruta", Assert.ThrowsAny<Exception>(() => sinClaves.Services).ToString());
+        using var sinLlave = new ApiEnEntorno("Production", null, conLlave: false);
+        Assert.Contains("llave de validación", Assert.ThrowsAny<Exception>(() => sinLlave.Services).ToString());
     }
 
     [Fact]

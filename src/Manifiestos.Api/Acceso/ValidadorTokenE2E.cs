@@ -28,11 +28,12 @@ public sealed class ValidadorTokenE2E : IValidadorTokenGoogle
     {
         if (string.IsNullOrEmpty(token) || token.Length > LargoMaximo) return null;
         var partes = token.Split('|');
-        if (partes.Length != 3 || partes[0] != Prefijo) return null;
+        // Cuarta parte opcional: el nonce del desafío móvil (el acceso móvil lo exige; el web no lo usa).
+        if (partes.Length is not (3 or 4) || partes[0] != Prefijo) return null;
         var correo = partes[1].Trim();
         var nombre = partes[2].Trim();
         if (!CorreoConForma(correo) || nombre.Length == 0) return null;
-        return new IdentidadGoogle(Emisor, "e2e:" + correo.ToLowerInvariant(), correo, CorreoVerificado: true, nombre);
+        return new IdentidadGoogle(Emisor, "e2e:" + correo.ToLowerInvariant(), correo, CorreoVerificado: true, nombre, partes.Length == 4 ? partes[3] : null);
     }
 
     /// <summary>Forma básica algo@dominio.ext, sin espacios.</summary>

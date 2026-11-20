@@ -1,0 +1,13 @@
+**/bin/
+**/obj/
+**/logs/
+.local/
+.salida-*/
+.vs/
+tests/
+deploy/secretos/
+deploy/respaldos/
+*.pem
+*.key
+.env
+.env.*

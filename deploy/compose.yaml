@@ -1,0 +1,126 @@
+# Paquete de despliegue (VPS Linux con Docker Compose). Ver operacion.MD.
+# Redes: «privada» es interna (sin salida a internet): PostgreSQL y la API solo viven ahí. «externa» da salida a la API
+# (validar tokens de Google, Drive) y a cloudflared. Nada se publica en el equipo: el único acceso desde fuera es el túnel.
+# Los repositorios backend/ y web/ deben ser carpetas hermanas (contexto de compilación del panel: ../../web).
+name: ${PROYECTO:-manifiestos}
+
+x-endurecido: &endurecido
+  restart: unless-stopped
+  security_opt: ["no-new-privileges:true"]
+  cap_drop: [ALL]
+
+services:
+  postgres:
+    <<: *endurecido
+    image: postgres:18.6-bookworm
+    environment:
+      POSTGRES_DB: manifiestos
+      POSTGRES_USER: manifiestos_owner
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      TZ: UTC
+    secrets: [postgres_password]
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    networks: [privada]
+    # postgres necesita estas capacidades para arrancar como root y bajar al usuario postgres.
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U manifiestos_owner -d manifiestos"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  migrar:
+    image: postgres:18.6-bookworm
+    entrypoint: ["bash", "/scripts/migrar.sh"]
+    environment:
+      CARGAR_DEMO: ${CARGAR_DEMO:-0}
+    secrets: [postgres_password, api_password]
+    volumes:
+      - ../database/migrations:/migraciones:ro
+      - ../database/demo:/demo:ro
+      - ./scripts:/scripts:ro
+    networks: [privada]
+    depends_on:
+      postgres: { condition: service_healthy }
+    restart: "no"
+
+  api:
+    <<: *endurecido
+    build: { context: .., dockerfile: Dockerfile }
+    image: manifiestos-api:${VERSION:-local}
+    environment:
+      Acceso__GoogleClientId: ${GOOGLE_CLIENT_ID:?Falta GOOGLE_CLIENT_ID en .env}
+      Acceso__OrganizacionId: ${ORGANIZACION_ID:?Falta ORGANIZACION_ID en .env}
+      Validacion__RutaLlave: /run/secrets/llave_validacion.pem
+      # Solo el nginx del paquete (IP fija en la red privada) puede declarar la IP y el esquema del cliente.
+      Manifiestos__ProxyConfiable__Redes__0: ${SUBRED_PRIVADA:-172.30.0.0/24}
+      Drive__CredencialesRuta: ${DRIVE_CREDENCIALES_RUTA:-}
+      Drive__UnidadId: ${DRIVE_UNIDAD_ID:-}
+      Drive__CarpetaRaiz: ${DRIVE_CARPETA_RAIZ:-}
+      Push__CredencialesRuta: ${PUSH_CREDENCIALES_RUTA:-}
+    secrets:
+      - source: llave_validacion
+        target: llave_validacion.pem
+      - source: cadena_conexion
+        target: ConnectionStrings__Manifiestos
+    volumes:
+      - archivos:/datos/archivos
+      - claves_sesion:/datos/claves-sesion
+      - registro:/datos/registro
+    networks: [privada, externa]
+    read_only: true
+    tmpfs: [/tmp]
+    depends_on:
+      migrar: { condition: service_completed_successfully }
+    healthcheck:
+      # La imagen no trae curl; bash sí. Comprueba /api/salud (base con el rol limitado + llave del QR cargada).
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8080 && printf 'GET /api/salud HTTP/1.0\\r\\nHost: x\\r\\n\\r\\n' >&3 && head -n1 <&3 | grep -q ' 200 '"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+
+  web:
+    <<: *endurecido
+    build: { context: ../../web, dockerfile: Dockerfile }
+    image: manifiestos-web:${VERSION:-local}
+    networks:
+      privada:
+        ipv4_address: ${IP_WEB:-172.30.0.10}
+    # web solo está en la red privada: así la API ve siempre la IP fija de Nginx (la única que acepta como proxy).
+    # Si web compartiera también «externa», Docker podría resolver «api» por esa red y la IP de origen dejaría de coincidir.
+    read_only: true
+    tmpfs: [/tmp]
+    depends_on:
+      api: { condition: service_healthy }
+
+  # Se activa con --profile tunel cuando exista el túnel (token en secretos/tunel_token). Apunta a http://web:8080.
+  cloudflared:
+    <<: *endurecido
+    profiles: [tunel]
+    image: cloudflare/cloudflared:2026.10.0
+    command: ["tunnel", "--no-autoupdate", "run", "--token-file", "/run/secrets/tunel_token"]
+    secrets: [tunel_token]
+    networks: [privada, externa]
+    depends_on:
+      web: { condition: service_started }
+
+secrets:
+  postgres_password: { file: "${SECRETOS_DIR:-./secretos}/postgres_password" }
+  api_password: { file: "${SECRETOS_DIR:-./secretos}/api_password" }
+  cadena_conexion: { file: "${SECRETOS_DIR:-./secretos}/ConnectionStrings__Manifiestos" }
+  llave_validacion: { file: "${SECRETOS_DIR:-./secretos}/llave_validacion.pem" }
+  tunel_token: { file: "${SECRETOS_DIR:-./secretos}/tunel_token" }
+
+volumes:
+  postgres_data:
+  archivos:
+  claves_sesion:
+  registro:
+
+networks:
+  privada:
+    internal: true
+    ipam: { config: [{ subnet: "${SUBRED_PRIVADA:-172.30.0.0/24}" }] }
+  externa: {}

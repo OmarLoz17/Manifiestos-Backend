@@ -1,0 +1,7 @@
+# Solo ensayo: acepta los tokens ficticios «e2e|correo|nombre[|nonce]» en lugar de Google, para recorrer el acceso web y móvil
+# sin cuentas reales. La API solo lo admite con el entorno E2E; en cualquier otro entorno el arranque falla (comprobado).
+services:
+  api:
+    environment:
+      ASPNETCORE_ENVIRONMENT: E2E
+      Acceso__PermitirTokensE2E: "true"

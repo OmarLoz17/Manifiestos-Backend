@@ -1,0 +1,18 @@
+# Solo ensayo local: datos ficticios y un acceso HTTPS con certificado autofirmado en 127.0.0.1:${PUERTO_TLS:-8443}.
+# Emula lo que el túnel de Cloudflare hará en producción (TLS en el borde, HTTP hacia web:8080).
+services:
+  migrar:
+    environment:
+      CARGAR_DEMO: "1"
+  web:
+    # Una red interna no permite publicar puertos; «borde» existe solo para el ensayo y no la comparte la API.
+    networks:
+      borde: {}
+    ports:
+      - "127.0.0.1:${PUERTO_TLS:-8443}:8443"
+    volumes:
+      - ./ensayo/nginx-tls.conf:/etc/nginx/conf.d/tls.conf:ro
+      - ${TLS_DIR:-./ensayo/tls}:/etc/nginx/tls:ro
+
+networks:
+  borde: {}

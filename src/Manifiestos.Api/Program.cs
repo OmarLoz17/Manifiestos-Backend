@@ -15,7 +15,9 @@ using Manifiestos.Api.Sitios;
 using Manifiestos.Api.Unidades;
 
 var builder = WebApplication.CreateBuilder(args);
+builder.AgregarSecretosEnArchivos();
 builder.AgregarRegistroEnArchivo();
+builder.AgregarClavesDeSesionPersistentes();
 
 builder.Services.AgregarProxyConfiable(builder.Configuration);
 builder.Services.AgregarAccesoWeb();
@@ -37,11 +39,16 @@ builder.Services.AgregarDrive(builder.Configuration);
 
 var app = builder.Build();
 
+// En producción la llave del QR debe existir al arrancar: una llave nueva invalidaría todos los QR impresos, y sin esta línea
+// la ausencia solo se descubriría con la primera emisión.
+if (app.Environment.IsProduction()) _ = app.Services.GetRequiredService<Manifiestos.Api.Documentos.LlaveValidacion>();
+
 app.UseForwardedHeaders();
 app.UseAuthentication();
 app.UseAuthorization();
 app.UseRateLimiter();
 
+app.MapearSalud();
 app.MapearAcceso();
 app.MapearAccesoMovil();
 app.MapearCapturasMovil();
