@@ -138,15 +138,40 @@ public sealed class AvisosTrabajo(NpgsqlDataSource datos, IEmisorPush emisor, IO
             cmd.Parameters.AddWithValue(org); cmd.Parameters.AddWithValue(rutaId);
             var tokens = new List<string>();
             await using (var lector = await cmd.ExecuteReaderAsync(ct)) while (await lector.ReadAsync(ct)) tokens.Add(lector.GetString(0));
-            if (tokens.Count == 0) return;
-            foreach (var muerto in await emisor.EnviarAsync(tokens, new AvisoPush(Titulo, texto), ct))
-            {
-                await using var del = datos.CreateCommand("SELECT seguridad.olvidar_token_push($1,$2)");
-                del.Parameters.AddWithValue(org); del.Parameters.AddWithValue(muerto);
-                await del.ExecuteNonQueryAsync(ct);
-            }
+            await EnviarYOlvidarAsync(org, tokens, texto, ct);
         }
         catch (Exception e) { log.LogWarning(e, "No se pudo avisar el cambio de la ruta {Ruta}.", rutaId); }
+    }
+
+    private async Task EnviarYOlvidarAsync(Guid org, IReadOnlyList<string> tokens, string texto, CancellationToken ct)
+    {
+        if (tokens.Count == 0) return;
+        foreach (var muerto in await emisor.EnviarAsync(tokens, new AvisoPush(Titulo, texto), ct))
+        {
+            await using var del = datos.CreateCommand("SELECT seguridad.olvidar_token_push($1,$2)");
+            del.Parameters.AddWithValue(org); del.Parameters.AddWithValue(muerto);
+            await del.ExecuteNonQueryAsync(ct);
+        }
+    }
+
+    private static int DiaIso(DateOnly f) => f.DayOfWeek == DayOfWeek.Sunday ? 7 : (int)f.DayOfWeek;
+
+    /// <summary>
+    /// Cambió el operador de una unidad: avisa al operador nuevo y al que acaba de salir (cambio de hace menos de 10 minutos) SI alguna ruta de la
+    /// unidad sale hoy, para que los dos teléfonos descarguen su trabajo de inmediato y no esperen la consulta periódica. Nunca lanza.
+    /// </summary>
+    public async Task AvisarCambioDeOperadorAsync(Guid unidadId, string texto, CancellationToken ct = default)
+    {
+        try
+        {
+            var org = acceso.Value.OrganizacionId;
+            await using var cmd = datos.CreateCommand("SELECT token FROM seguridad.destinatarios_aviso_cambio_operador($1,$2,$3)");
+            cmd.Parameters.AddWithValue(org); cmd.Parameters.AddWithValue(unidadId); cmd.Parameters.AddWithValue(DiaIso(HoyLocal()));
+            var tokens = new List<string>();
+            await using (var lector = await cmd.ExecuteReaderAsync(ct)) while (await lector.ReadAsync(ct)) tokens.Add(lector.GetString(0));
+            await EnviarYOlvidarAsync(org, tokens, texto, ct);
+        }
+        catch (Exception e) { log.LogWarning(e, "No se pudo avisar el cambio de operador de la unidad {Unidad}.", unidadId); }
     }
 
     /// <summary>La ruta sale hoy (según su última revisión)? Para los cambios del plan, que no traen fecha.</summary>
@@ -155,8 +180,10 @@ public sealed class AvisosTrabajo(NpgsqlDataSource datos, IEmisorPush emisor, IO
         try
         {
             var hoy = HoyLocal();
-            await using var cmd = datos.CreateCommand("SELECT coalesce((SELECT (dias & (1 << ($3 - 1))) <> 0 FROM negocio.ruta_version WHERE organizacion_id=$1 AND ruta_id=$2 ORDER BY revision DESC LIMIT 1), false)");
-            cmd.Parameters.AddWithValue(acceso.Value.OrganizacionId); cmd.Parameters.AddWithValue(rutaId); cmd.Parameters.AddWithValue((int)(hoy.DayOfWeek == DayOfWeek.Sunday ? 7 : (int)hoy.DayOfWeek));
+            // Función de la base (0071): una consulta directa a negocio.ruta_version desde el rol de la API, sin contexto de usuario, no ve filas
+            // por las políticas de seguridad de filas y el aviso nunca se enviaba.
+            await using var cmd = datos.CreateCommand("SELECT seguridad.ruta_sale_hoy($1,$2,$3)");
+            cmd.Parameters.AddWithValue(acceso.Value.OrganizacionId); cmd.Parameters.AddWithValue(rutaId); cmd.Parameters.AddWithValue(DiaIso(hoy));
             if ((bool)(await cmd.ExecuteScalarAsync(ct))!) await AvisarAsync(rutaId, hoy, texto, ct);
         }
         catch (Exception e) { log.LogWarning(e, "No se pudo revisar si la ruta {Ruta} sale hoy.", rutaId); }

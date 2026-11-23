@@ -66,13 +66,16 @@ public static class EndpointsUnidades
         return Responder(await unidades.EditarAsync(org, acceso, id, datos!, s.Revision.Value, http.RequestAborted), creada: false, null);
     }
 
-    private static async Task<IResult> AsignarOperadorAsync(Guid id, SolicitudOperadorUnidad s, HttpContext http, IRepositorioUnidades unidades)
+    private static async Task<IResult> AsignarOperadorAsync(Guid id, SolicitudOperadorUnidad s, HttpContext http, IRepositorioUnidades unidades, Avisos.AvisosTrabajo avisos)
     {
         if (!ServiciosAcceso.LeerIds(http.User, out var org, out var acceso)) return Results.Unauthorized();
         if (s.OperadorId == Guid.Empty) return Error("El operador elegido no está disponible.");
         // 0 = la unidad no tenía asignación de operador en el listado.
         if (s.Revision is not >= 0) return Error("Falta la revisión de la asignación que se vio.");
-        return Responder(await unidades.AsignarOperadorAsync(org, acceso, id, s.OperadorId, s.Revision.Value, http.RequestAborted), creada: false, null);
+        var resultado = await unidades.AsignarOperadorAsync(org, acceso, id, s.OperadorId, s.Revision.Value, http.RequestAborted);
+        // Avisa a los teléfonos del operador nuevo y del que sale (si alguna ruta de la unidad sale hoy) para que descarguen su trabajo ya.
+        if (resultado.Estado == EstadoEscritura.Correcta) _ = Task.Run(() => avisos.AvisarCambioDeOperadorAsync(id, "Cambió tu ruta de hoy."));
+        return Responder(resultado, creada: false, null);
     }
 
     private static IResult? Validar(string? numero, string? placas, string? marca, string? tipo, short? capacidad,
