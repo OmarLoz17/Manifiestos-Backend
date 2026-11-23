@@ -146,6 +146,7 @@ public static class AccesoMovil
     public static IServiceCollection AgregarAccesoMovil(this IServiceCollection services)
     {
         services.AddSingleton<RepositorioAccesoMovil>();
+        services.AgregarActualizacionesApp();
         // Tokens opacos del framework. Refresh y sesión se renuevan juntos (migración 0022).
         services.AddAuthentication().AddBearerToken(Esquema, o => {
             o.BearerTokenExpiration=TimeSpan.FromMinutes(15); o.RefreshTokenExpiration=TimeSpan.FromDays(30);
@@ -161,6 +162,7 @@ public static class AccesoMovil
     }
     public static void MapearAccesoMovil(this IEndpointRouteBuilder app)
     {
+        app.MapearActualizacionesApp();
         var g=app.MapGroup("/api/movil/auth");
         g.AddEndpointFilter(async (c,next) => {
             c.HttpContext.Response.Headers.CacheControl="no-store";

@@ -32,3 +32,4 @@ deploy/ensayo/tls/
 deploy/.env
 deploy/ensayo/.estado/
 deploy/restaurado/
+deploy/actualizaciones/

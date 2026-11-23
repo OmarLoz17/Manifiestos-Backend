@@ -72,6 +72,8 @@ services:
       - archivos:/datos/archivos
       - claves_sesion:/datos/claves-sesion
       - registro:/datos/registro
+      # Actualizaciones de la app Android (decisión 0041): carpeta del anfitrión con app-piloto.apk y version.json, solo lectura para la API.
+      - ./actualizaciones:/datos/actualizaciones:ro
     networks: [privada, externa]
     read_only: true
     tmpfs: [/tmp]
