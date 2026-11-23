@@ -87,7 +87,11 @@ services:
 
   web:
     <<: *endurecido
-    build: { context: ../../web, dockerfile: Dockerfile }
+    build:
+      context: ../../web
+      dockerfile: Dockerfile
+      # Mismo Client ID web que valida la API: el botón de Google del panel lo necesita al compilar.
+      args: { VITE_GOOGLE_CLIENT_ID: "${GOOGLE_CLIENT_ID:?Falta GOOGLE_CLIENT_ID en .env}" }
     image: manifiestos-web:${VERSION:-local}
     networks:
       privada:
