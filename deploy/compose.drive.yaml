@@ -1,0 +1,14 @@
+# Activa la subida de evidencias a Drive (solo el backend accede a Drive). Se suma a compose.yaml:
+#   docker compose -f compose.yaml [-f compose.ensayo.yaml] -f compose.drive.yaml up -d api
+# Requiere secretos/drive-servicio.json (JSON de la cuenta de servicio, permisos 644 dentro de la carpeta secretos/ 700)
+# y en .env: DRIVE_UNIDAD_ID y DRIVE_CARPETA_RAIZ (producción: manifiestos-servidor; la carpeta manifiestos-local es de pruebas).
+services:
+  api:
+    environment:
+      Drive__CredencialesRuta: /run/secrets/drive_servicio.json
+    secrets:
+      - source: drive_servicio
+        target: drive_servicio.json
+secrets:
+  drive_servicio:
+    file: "${SECRETOS_DIR:-./secretos}/drive-servicio.json"
