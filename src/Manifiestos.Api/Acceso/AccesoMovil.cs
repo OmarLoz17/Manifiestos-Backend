@@ -106,6 +106,22 @@ public sealed class RepositorioAccesoMovil(NpgsqlDataSource datos)
         cmd.Parameters.AddWithValue(SHA256.HashData(Encoding.UTF8.GetBytes(identidad.Nonce!)));
         var id = await cmd.ExecuteScalarAsync(ct); return id is Guid g ? g : null;
     }
+    /// <summary>Desafío para pedir acceso desde un equipo que todavía no está vinculado (migración 0070).</summary>
+    public async Task<Guid> CrearDesafioSolicitudAsync(Guid org, Guid instalacion, byte[] hash, CancellationToken ct)
+    {
+        await using var cmd = datos.CreateCommand("SELECT seguridad.crear_desafio_solicitud_equipo($1,$2,$3)");
+        cmd.Parameters.AddWithValue(org); cmd.Parameters.AddWithValue(instalacion); cmd.Parameters.AddWithValue(hash);
+        return (Guid)(await cmd.ExecuteScalarAsync(ct))!;
+    }
+    /// <summary>'solicitada', 'vinculado' o el motivo del rechazo. Solo correos ya autorizados pueden solicitar; no habilita nada.</summary>
+    public async Task<string> SolicitarEquipoAsync(Guid org, IdentidadGoogle identidad, Guid instalacion, Guid desafio, CancellationToken ct)
+    {
+        await using var cmd = datos.CreateCommand("SELECT seguridad.solicitar_equipo($1,$2,$3,$4,$5,$6,$7)");
+        cmd.Parameters.AddWithValue(org); cmd.Parameters.AddWithValue(identidad.Emisor); cmd.Parameters.AddWithValue(identidad.Sujeto);
+        cmd.Parameters.AddWithValue(identidad.Correo); cmd.Parameters.AddWithValue(instalacion); cmd.Parameters.AddWithValue(desafio);
+        cmd.Parameters.AddWithValue(SHA256.HashData(Encoding.UTF8.GetBytes(identidad.Nonce!)));
+        return (string)(await cmd.ExecuteScalarAsync(ct))!;
+    }
     public async Task<ContextoOperador?> ObtenerAsync(Guid org, Guid sesion, CancellationToken ct)
     {
         await using var cmd = datos.CreateCommand("SELECT * FROM seguridad.sesion_operador($1,$2)");
@@ -165,6 +181,22 @@ public static class AccesoMovil
             var org=opciones.Value.OrganizacionId;
             var sesion=await repo.IniciarAsync(org,identidad,s.InstalacionId,s.DesafioId,http.RequestAborted);
             return sesion is null ? Rechazo() : Emitir(org,sesion.Value);
+        }).AllowAnonymous().RequireRateLimiting(ServiciosAcceso.PoliticaLogin);
+        // «Solicitar acceso»: un equipo sin vincular pide que Operaciones lo apruebe para una cuenta ya autorizada.
+        // Misma validación de Google y nonce de un solo uso que el login; la solicitud no habilita nada.
+        g.MapPost("/solicitar-desafio", async (SolicitudDesafioMovil s,HttpContext http,RepositorioAccesoMovil repo,IOptions<OpcionesAcceso> opciones) => {
+            if (s.InstalacionId==Guid.Empty) return Results.BadRequest();
+            var nonce=Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(32));
+            var id=await repo.CrearDesafioSolicitudAsync(opciones.Value.OrganizacionId,s.InstalacionId,SHA256.HashData(Encoding.UTF8.GetBytes(nonce)),http.RequestAborted);
+            return Results.Ok(new DesafioMovil(id,nonce,120));
+        }).AllowAnonymous().RequireRateLimiting(ServiciosAcceso.PoliticaLogin);
+        g.MapPost("/solicitar-equipo", async (SolicitudGoogleMovil s,HttpContext http,IValidadorTokenGoogle google,RepositorioAccesoMovil repo,IOptions<OpcionesAcceso> opciones) => {
+            if (s.InstalacionId==Guid.Empty || s.DesafioId==Guid.Empty) return Results.BadRequest();
+            var identidad=await google.ValidarAsync(s.Credential??"",http.RequestAborted);
+            if (identidad is null) return Results.Json(new MensajeError(EndpointsAcceso.MensajeTokenInvalido),statusCode:401);
+            if (!identidad.CorreoVerificado || string.IsNullOrWhiteSpace(identidad.Nonce) || identidad.Nonce.Length>256) return Rechazo();
+            var resultado=await repo.SolicitarEquipoAsync(opciones.Value.OrganizacionId,identidad,s.InstalacionId,s.DesafioId,http.RequestAborted);
+            return resultado is "solicitada" or "vinculado" ? Results.Ok(new { estado = resultado=="solicitada" ? "pendiente" : "vinculado" }) : Rechazo();
         }).AllowAnonymous().RequireRateLimiting(ServiciosAcceso.PoliticaLogin);
         g.MapPost("/refresh", async (SolicitudRenovarMovil s,HttpContext http,IOptionsMonitor<BearerTokenOptions> tokens,
             RepositorioAccesoMovil repo,IOptions<OpcionesAcceso> acceso) => {

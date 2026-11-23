@@ -166,7 +166,7 @@ public static class EndpointsOperadores
     public const string MensajeNoEncontrado = "No se encontró el operador.";
 
     public static IServiceCollection AgregarOperadores(this IServiceCollection services) =>
-        services.AddSingleton<IRepositorioOperadores, RepositorioOperadores>();
+        services.AddSingleton<IRepositorioOperadores, RepositorioOperadores>().AgregarEquipos();
 
     public static void MapearOperadores(this IEndpointRouteBuilder app)
     {
@@ -175,6 +175,7 @@ public static class EndpointsOperadores
         g.MapGet("", ListarAsync);
         g.MapPost("", CrearAsync).AddEndpointFilter(EndpointsAcceso.ValidarCsrf);
         g.MapPut("/{id:guid}", EditarAsync).AddEndpointFilter(EndpointsAcceso.ValidarCsrf);
+        app.MapearEquipos();
     }
 
     private static async Task<IResult> ListarAsync(HttpContext http, IRepositorioOperadores operadores)
