@@ -258,6 +258,9 @@ public sealed class ManifiestosTests : IClassFixture<BaseDatosPrueba>, IAsyncLif
         using var anonimo = _api.NuevoNavegador();
         Assert.Equal(HttpStatusCode.Unauthorized, (await anonimo.PostAsync($"/api/manifiestos/{m.Manifiesto}/validacion", null)).StatusCode);
         Assert.Equal(HttpStatusCode.BadRequest, (await nav.PostAsync($"/api/manifiestos/{m.Manifiesto}/validacion", null)).StatusCode);   // sin CSRF
+        Assert.Equal(HttpStatusCode.Conflict, (await nav.PrepararImpresionAsync(m.Manifiesto)).StatusCode); // folio legado sin archivos de firma
+        Assert.Equal(HttpStatusCode.Conflict, (await nav.PrepararImpresionAsync(sinFolio.Manifiesto)).StatusCode);
+        Assert.Equal("1", await _bd.ConsultarAsync($"SELECT count(*) FROM negocio.codigo_validacion_manifiesto WHERE manifiesto_id = '{m.Manifiesto}'"));
     }
 
     [Fact]
@@ -296,7 +299,9 @@ public sealed class ManifiestosTests : IClassFixture<BaseDatosPrueba>, IAsyncLif
         async Task<ResultadoVerificacion> Verificar(VerificacionImpresa v) =>
             (await (await publico.PostAsJsonAsync($"/api/validacion/{codigo}/verificar", v)).Content.ReadFromJsonAsync<ResultadoVerificacion>())!;
         // Mayúsculas, acentos y espacios de más no cuentan; los datos exactos coinciden.
-        Assert.True((await Verificar(new VerificacionImpresa("004/2026", 15m, "  ptar   ficticia norte ", null, null, 0))).Coincide);
+        var coincide = await Verificar(new VerificacionImpresa("004/2026", 15m, "  ptar   ficticia norte ", null, " ", 0));
+        Assert.True(coincide.Coincide);
+        Assert.Equal(["folio", "destinatario", "cantidad", "firmas"], coincide.CamposComparados);
         // Misma hoja pero con otra cantidad y otro destinatario: no coincide y dice qué cambió.
         var mal = await Verificar(new VerificacionImpresa("004/2026", 18m, "Otra planta", null, null, null));
         Assert.False(mal.Coincide);
@@ -305,6 +310,28 @@ public sealed class ManifiestosTests : IClassFixture<BaseDatosPrueba>, IAsyncLif
         // Con un código alterado ni siquiera se compara.
         var r = await (await publico.PostAsJsonAsync($"/api/validacion/{Alterar(codigo)}/verificar", new VerificacionImpresa("004/2026", 15m, null, null, null, null))).Content.ReadFromJsonAsync<ResultadoVerificacion>();
         Assert.Equal(("no_autentico", false), (r!.Estado, r.Coincide));
+        Assert.Empty(r.CamposComparados);
+    }
+
+    [Fact]
+    public async Task Verificar_lo_impreso_rechaza_solicitudes_sin_campos_validos()
+    {
+        var m = await SembrarAsync(Suc, "2026-11-04T09:00:00-06:00", conDescarga: true, folio: "004/2026");
+        using var nav = await SesionAsync();
+        var codigo = (await EmitirCodigoAsync(nav, m.Manifiesto)).Codigo!.Codigo;
+        using var publico = _api.NuevoNavegador();
+        var solicitudes = new[]
+        {
+            new VerificacionImpresa(null, null, null, null, null, null),
+            new VerificacionImpresa(" ", null, "\t", null, null, null),
+            new VerificacionImpresa(null, -1m, "PTAR Ficticia Norte", null, null, null),
+            new VerificacionImpresa("004/2026", null, null, null, null, 4),
+        };
+        foreach (var solicitud in solicitudes)
+        {
+            using var respuesta = await publico.PostAsJsonAsync($"/api/validacion/{codigo}/verificar", solicitud);
+            Assert.Equal(HttpStatusCode.BadRequest, respuesta.StatusCode);
+        }
     }
 
     [Fact]

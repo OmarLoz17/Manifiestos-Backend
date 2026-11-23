@@ -1,6 +1,8 @@
 using Manifiestos.Api.Acceso;
 using Manifiestos.Api.Datos;
 using System.Text.Json;
+using System.Text.Json.Serialization;
+using System.Data;
 using Npgsql;
 
 namespace Manifiestos.Api.Documentos;
@@ -9,7 +11,8 @@ namespace Manifiestos.Api.Documentos;
 
 public sealed record UnidadDeManifiesto(string? NumeroEconomico, decimal? CapacidadM3, Guid? Id = null);
 public sealed record DescargaDeManifiesto(DateTimeOffset? Fecha, string? Planta);
-public sealed record ParticipanteManifiesto(string Rol, string Nombre, string? Rfc, string? Autorizacion);
+public sealed record ParticipanteManifiesto(string Rol, string Nombre, string? Rfc, string? Autorizacion,
+    [property: JsonIgnore] Guid? EmpresaId = null);
 public sealed record RenglonManifiesto(
     int Renglon, string? Descripcion, string? Contenedor, decimal? CapacidadContenedor, string? UnidadCapacidad, int? NumeroContenedores,
     decimal? Cantidad, string? UnidadCantidad, string? Naturaleza, string? Metodo);
@@ -32,7 +35,8 @@ public sealed record ManifiestoResumen(
     Guid Id, Guid SucursalId, Guid? ClienteId, string? Cliente, int Revision, string? Folio, DateTimeOffset Fecha,
     UnidadDeManifiesto? Unidad, DescargaDeManifiesto? Descarga, IReadOnlyList<ParticipanteManifiesto> Participantes,
     IReadOnlyList<RenglonManifiesto> Renglones, string? InstruccionesSeguridad, string? ObservacionesRecepcion, int Documentos,
-    string Tipo = "fosa_fija", DatosSanitarios? Sanitarios = null, IReadOnlyList<EvidenciaManifiesto>? Evidencias = null, FirmaPrecargadaManifiesto? GeneradorPrecargado = null);
+    string Tipo = "fosa_fija", DatosSanitarios? Sanitarios = null, IReadOnlyList<EvidenciaManifiesto>? Evidencias = null, FirmaPrecargadaManifiesto? GeneradorPrecargado = null,
+    bool GeneradorEsTransportista = false);
 
 /// <summary>Archivo de evidencia de un manifiesto (foto o firma); se ve en el panel con GET /api/archivos/{id}.</summary>
 public sealed record EvidenciaManifiesto(Guid ArchivoId, string Rol, double? Latitud = null, double? Longitud = null, double? PrecisionM = null, string? Nombre = null);
@@ -50,14 +54,14 @@ public sealed class RepositorioManifiestos(NpgsqlDataSource datos) : IRepositori
 {
     public async Task<IReadOnlyList<ManifiestoResumen>> ListarAsync(Guid organizacion, Guid acceso, CancellationToken ct)
     {
-        await using var tx = await TransaccionContexto.AbrirAsync(datos, organizacion, acceso, ct);
+        await using var tx = await TransaccionContexto.AbrirAsync(datos, organizacion, acceso, ct, IsolationLevel.RepeatableRead);
         string? T(NpgsqlDataReader r, int i) => r.IsDBNull(i) ? null : r.GetString(i);
         decimal? D(NpgsqlDataReader r, int i) => r.IsDBNull(i) ? null : r.GetDecimal(i);
 
         var participantes = new Dictionary<Guid, List<ParticipanteManifiesto>>();
         await using (var cmd = tx.Comando("""
             SELECT p.version_id, p.rol, coalesce(nullif(btrim(fe.nombre_comercial), ''), nullif(btrim(fe.nombre_fiscal), ''), 'Sin nombre'),
-                   fe.rfc, au.numero
+                   fe.rfc, au.numero, p.empresa_id
             FROM negocio.participante_manifiesto p
             JOIN negocio.ficha_empresa fe ON (fe.organizacion_id, fe.empresa_id, fe.id) = (p.organizacion_id, p.empresa_id, p.ficha_empresa_id)
             LEFT JOIN negocio.autorizacion_empresa au ON (au.organizacion_id, au.empresa_id, au.id) = (p.organizacion_id, p.empresa_id, p.autorizacion_id)
@@ -68,7 +72,7 @@ public sealed class RepositorioManifiestos(NpgsqlDataSource datos) : IRepositori
             while (await r.ReadAsync(ct))
             {
                 if (!participantes.TryGetValue(r.GetGuid(0), out var l)) participantes[r.GetGuid(0)] = l = [];
-                l.Add(new ParticipanteManifiesto(r.GetString(1), r.GetString(2), T(r, 3), T(r, 4)));
+                l.Add(new ParticipanteManifiesto(r.GetString(1), r.GetString(2), T(r, 3), T(r, 4), r.GetGuid(5)));
             }
 
         var renglones = new Dictionary<Guid, List<RenglonManifiesto>>();
@@ -140,7 +144,7 @@ public sealed class RepositorioManifiestos(NpgsqlDataSource datos) : IRepositori
             JOIN negocio.evidencia_captura e ON (e.organizacion_id, e.sucursal_id, e.captura_id) = (c.organizacion_id, c.sucursal_id, c.captura_id)
             LEFT JOIN negocio.captura_trabajo ct ON (ct.organizacion_id, ct.sucursal_id, ct.captura_id) = (c.organizacion_id, c.sucursal_id, c.captura_id)
             LEFT JOIN seguridad.persona p ON (p.organizacion_id, p.id) = (ct.organizacion_id, ct.persona_id)
-            WHERE c.organizacion_id = $1 AND e.archivo_id IS NOT NULL ORDER BY c.manifiesto_id, e.recibida_en
+            WHERE c.organizacion_id = $1 AND e.archivo_id IS NOT NULL ORDER BY c.manifiesto_id, e.recibida_en, e.id
             """, organizacion))
         await using (var r = await cmd.ExecuteReaderAsync(ct))
             while (await r.ReadAsync(ct))
@@ -149,13 +153,13 @@ public sealed class RepositorioManifiestos(NpgsqlDataSource datos) : IRepositori
                 l.Add(new EvidenciaManifiesto(r.GetGuid(1), r.GetString(2), r.IsDBNull(3) ? null : Convert.ToDouble(r.GetValue(3)), r.IsDBNull(4) ? null : Convert.ToDouble(r.GetValue(4)), r.IsDBNull(5) ? null : Convert.ToDouble(r.GetValue(5)), T(r, 6)));
             }
 
-        var precargadas = new Dictionary<Guid, FirmaPrecargadaManifiesto>();
+        var precargadas = new Dictionary<(Guid Sucursal, Guid Empresa), FirmaPrecargadaManifiesto>();
         await using (var cmd = tx.Comando("""
-            SELECT DISTINCT ON (sucursal_id) sucursal_id, nombre_firmante, es_provisional, archivo_id FROM negocio.firma_generador_precargada
-            WHERE organizacion_id = $1 ORDER BY sucursal_id, vigente_desde DESC
+            SELECT DISTINCT ON (sucursal_id, empresa_id) sucursal_id, empresa_id, nombre_firmante, es_provisional, archivo_id FROM negocio.firma_generador_precargada
+            WHERE organizacion_id = $1 AND vigente_desde <= now() ORDER BY sucursal_id, empresa_id, revision DESC
             """, organizacion))
         await using (var r = await cmd.ExecuteReaderAsync(ct))
-            while (await r.ReadAsync(ct)) precargadas[r.GetGuid(0)] = new FirmaPrecargadaManifiesto(r.GetString(1), r.GetBoolean(2), r.IsDBNull(3) ? null : r.GetGuid(3));
+            while (await r.ReadAsync(ct)) precargadas[(r.GetGuid(0), r.GetGuid(1))] = new FirmaPrecargadaManifiesto(r.GetString(2), r.GetBoolean(3), r.IsDBNull(4) ? null : r.GetGuid(4));
 
         // Fosa fija: la orden queda descargada cuando quien recibe en la planta ya firmó (captura RECEPCION_PLANTA de la orden); no hay que esperar otro registro.
         var plantaFosaFija = new Dictionary<Guid, DescargaDeManifiesto>();
@@ -221,12 +225,16 @@ public sealed class RepositorioManifiestos(NpgsqlDataSource datos) : IRepositori
                             new FirmaPersonaSanitarios(rec.Operador, rec.FirmaOp), new FirmaPersonaSanitarios(rec.Recibe, rec.FirmaRec)),
                         paradas);
                 }
+                IReadOnlyList<ParticipanteManifiesto> partes = participantes.GetValueOrDefault(version) ?? [];
+                var generador = partes.FirstOrDefault(p => p.Rol == "generador")?.EmpresaId;
+                var generadorEsTransportista = generador.HasValue && generador == partes.FirstOrDefault(p => p.Rol == "transportista")?.EmpresaId;
+                var firmaPrecargada = generadorEsTransportista ? precargadas.GetValueOrDefault((r.GetGuid(1), generador!.Value)) : null;
                 lista.Add(new ManifiestoResumen(
                     r.GetGuid(0), r.GetGuid(1), r.IsDBNull(2) ? null : r.GetGuid(2), T(r, 3), r.GetInt32(5), T(r, 6), fecha,
                     r.GetBoolean(10) ? new UnidadDeManifiesto(T(r, 8), D(r, 9), r.IsDBNull(18) ? null : r.GetGuid(18)) : null,
                     r.GetBoolean(11) ? new DescargaDeManifiesto(r.IsDBNull(12) ? null : new DateTimeOffset(DateTime.SpecifyKind(r.GetDateTime(12), DateTimeKind.Utc)), T(r, 13)) : plantaFosaFija.GetValueOrDefault(r.GetGuid(0)),
-                    participantes.GetValueOrDefault(version) ?? [], renglonesM,
-                    T(r, 14), T(r, 15), (int)r.GetInt64(16), T(r, 17) ?? "fosa_fija", san, evidencias.GetValueOrDefault(r.GetGuid(0)) ?? [], precargadas.GetValueOrDefault(r.GetGuid(1))));
+                    partes, renglonesM,
+                    T(r, 14), T(r, 15), (int)r.GetInt64(16), T(r, 17) ?? "fosa_fija", san, evidencias.GetValueOrDefault(r.GetGuid(0)) ?? [], firmaPrecargada, generadorEsTransportista));
             }
         await tx.ConfirmarAsync(ct);
         return lista;

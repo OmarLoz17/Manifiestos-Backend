@@ -5,6 +5,7 @@ using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
 using Manifiestos.Api.Acceso;
+using Manifiestos.Api.Documentos;
 using Manifiestos.Api.Tests.Infraestructura;
 
 namespace Manifiestos.Api.Tests;
@@ -257,6 +258,31 @@ public sealed class CapturasMovilTests(BaseDatosPrueba bd) : IClassFixture<BaseD
         Assert.Equal("estimada", await bd.ConsultarAsync($"SELECT d.naturaleza_cantidad FROM negocio.detalle_manifiesto d JOIN negocio.version_manifiesto v ON v.id=d.version_id WHERE v.manifiesto_id='{m}'"));
         var folio1 = await bd.ConsultarAsync($"SELECT numero_manifiesto FROM negocio.version_manifiesto WHERE manifiesto_id='{m}'");
         Assert.Matches(@"^\d{3}/" + DateTime.UtcNow.Year + "$", folio1);
+        var correoPanel = $"imprimir-fosa-{Guid.NewGuid():N}@example.invalid";
+        await bd.AutorizarAsync(correoPanel);
+        using var panel = _api.NuevoNavegador();
+        Assert.Equal(HttpStatusCode.NoContent, (await panel.EntrarAsync(ValidadorFicticio.Token($"s-{correoPanel}", correoPanel))).StatusCode);
+        var id = Guid.Parse(m);
+        var respuestas = await Task.WhenAll(panel.PrepararImpresionAsync(id), panel.PrepararImpresionAsync(id));
+        var copias = new List<CodigoValidacion>();
+        foreach (var respuesta in respuestas)
+        {
+            using var resp = respuesta;
+            Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+            copias.Add((await resp.Content.ReadFromJsonAsync<CodigoValidacion>())!);
+        }
+        Assert.Equal(copias[0].Codigo, copias[1].Codigo);
+        Assert.Equal(copias[0].Huella, copias[1].Huella);
+        Assert.Equal("1", await bd.ConsultarAsync($"SELECT count(*) FROM negocio.codigo_validacion_manifiesto WHERE manifiesto_id='{m}'"));
+        var impreso = Assert.IsType<ManifiestoResumen>(copias[0].Impreso);
+        Assert.Equal(folio1, impreso.Folio);
+        Assert.Contains(impreso.Evidencias!, e => e.Rol == "FIRMA_CLIENTE" && e.Nombre == "Cliente Ficticio");
+        Assert.Contains(impreso.Evidencias!, e => e.Rol == "FOTO" && e.Latitud is not null);
+        using var lector = _api.NuevoNavegador();
+        var publicado = (await lector.GetFromJsonAsync<ResultadoValidacion>($"/api/validacion/{copias[0].Codigo}"))!;
+        Assert.Equal("autentico", publicado.Estado);
+        Assert.Equal(folio1, publicado.Datos!.Folio);
+        Assert.Equal(3, publicado.Datos.Firmas);
         // Segunda orden: completa sus propios pasos y obtiene su propio manifiesto, en otro orden de llegada.
         foreach (var paso in new[] { "planta", "servicio", "cliente" }) { Assert.Equal(HttpStatusCode.OK, (await PasoAsync(s, o, 1, paso)).StatusCode); await RecibirArchivosAsync(s, o.Ordenes[1]); }
         Assert.Equal("1", await ManifiestosDeAsync(o.Ordenes[1]));

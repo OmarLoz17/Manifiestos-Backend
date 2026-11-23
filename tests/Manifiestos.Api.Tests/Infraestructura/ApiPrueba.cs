@@ -106,6 +106,13 @@ public static class ExtensionesNavegador
         return r!.Token;
     }
 
+    public static async Task<HttpResponseMessage> PrepararImpresionAsync(this HttpClient c, Guid manifiesto)
+    {
+        using var req = new HttpRequestMessage(HttpMethod.Post, $"/api/manifiestos/{manifiesto}/impresion");
+        req.Headers.Add(ServiciosAcceso.CabeceraCsrf, await c.CsrfAsync());
+        return await c.SendAsync(req);
+    }
+
     public static async Task<HttpResponseMessage> EntrarAsync(this HttpClient c, string token, bool conCsrf = true)
     {
         var req = new HttpRequestMessage(HttpMethod.Post, "/api/auth/google") { Content = JsonContent.Create(new { credential = token }) };

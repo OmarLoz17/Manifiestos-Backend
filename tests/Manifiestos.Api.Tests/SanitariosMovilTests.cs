@@ -5,6 +5,7 @@ using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
 using Manifiestos.Api.Acceso;
+using Manifiestos.Api.Documentos;
 using Manifiestos.Api.Tests.Infraestructura;
 
 namespace Manifiestos.Api.Tests;
@@ -14,7 +15,7 @@ namespace Manifiestos.Api.Tests;
 /// con folio consecutivo. El operador nunca ve folio ni manifiesto. Datos ficticios; volúmenes en m3 estimados.
 /// </summary>
 [Trait("Categoria", "Integracion")]
-public sealed class SanitariosMovilTests(BaseDatosPrueba bd) : IClassFixture<BaseDatosPrueba>, IAsyncLifetime
+public sealed partial class SanitariosMovilTests(BaseDatosPrueba bd) : IClassFixture<BaseDatosPrueba>, IAsyncLifetime
 {
     private static readonly Guid Org = BaseDatosPrueba.Organizacion, Suc = BaseDatosPrueba.Sucursal;
     private const string EmpresaNuestra = "0f000000-0000-4000-8000-000000000002";
@@ -28,7 +29,7 @@ public sealed class SanitariosMovilTests(BaseDatosPrueba bd) : IClassFixture<Bas
     /// <summary>Escenario: una unidad de 1 m3 con dos rutas (LMV y MJS), tres paradas, un cliente general, una planta y la jornada de hoy.</summary>
     private sealed record Escenario(Guid Unidad, Guid Jornada, Guid Jornada2, Guid ParadaA, Guid ParadaB, Guid ParadaC, Guid Planta, Guid Cliente);
 
-    private async Task<Sesion> SesionAsync()
+    private async Task<(string Correo, Guid Persona, Guid Instalacion)> AltaOperadorAsync()
     {
         var correo = $"san-{Guid.NewGuid():N}@example.invalid"; var persona = Guid.NewGuid(); var instalacion = Guid.NewGuid(); var dispositivo = Guid.NewGuid();
         await bd.AutorizarAsync(correo, "telefono_operador", conSucursal: false);
@@ -40,6 +41,12 @@ public sealed class SanitariosMovilTests(BaseDatosPrueba bd) : IClassFixture<Bas
             INSERT INTO seguridad.asignacion_equipo(organizacion_id,sucursal_id,dispositivo_id,acceso_id,persona_id,revision,desde)
             SELECT organizacion_id,'{Suc}','{dispositivo}',id,'{persona}',1,now()-interval '1 minute' FROM seguridad.acceso_autorizado WHERE correo_permitido='{correo}';
             """);
+        return (correo, persona, instalacion);
+    }
+
+    private async Task<Sesion> SesionAsync()
+    {
+        var (correo, persona, instalacion) = await AltaOperadorAsync();
         var http = _api.NuevoNavegador();
         var d = (await (await http.PostAsJsonAsync("/api/movil/auth/desafio", new { instalacionId = instalacion })).Content.ReadFromJsonAsync<DesafioMovil>())!;
         var r = await http.PostAsJsonAsync("/api/movil/auth/google", new SolicitudGoogleMovil(ValidadorFicticio.Token($"s-{Guid.NewGuid():N}", correo, true, nonce: d.Nonce), instalacion, d.Id));
@@ -48,7 +55,9 @@ public sealed class SanitariosMovilTests(BaseDatosPrueba bd) : IClassFixture<Bas
         return new Sesion(http, persona, (await http.GetFromJsonAsync<UsuarioMovil>("/api/movil/auth/me"))!);
     }
 
-    private async Task<Escenario> EscenarioAsync(Sesion s)
+    private Task<Escenario> EscenarioAsync(Sesion s) => EscenarioAsync(s.Persona);
+
+    private async Task<Escenario> EscenarioAsync(Guid persona)
     {
         var (unidad, r1, r2, pa, pb, pc, sa, sb, sc, planta, emp, cli, j1, j2) = (Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(),
             Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid());
@@ -60,7 +69,7 @@ public sealed class SanitariosMovilTests(BaseDatosPrueba bd) : IClassFixture<Bas
             WHERE NOT EXISTS (SELECT 1 FROM negocio.ficha_empresa WHERE empresa_id = '{EmpresaNuestra}');
             INSERT INTO negocio.vehiculo VALUES ('{Org}', '{Suc}', '{unidad}', 'SN-{N(unidad)}');
             INSERT INTO negocio.ficha_vehiculo(organizacion_id, sucursal_id, vehiculo_id, revision, capacidad_id, clasificacion, numero_economico) VALUES ('{Org}', '{Suc}', '{unidad}', 1, 4, 'sanitarios', 'SN-{N(unidad)}');
-            INSERT INTO negocio.asignacion_unidad(organizacion_id, sucursal_id, vehiculo_id, revision, persona_id) VALUES ('{Org}', '{Suc}', '{unidad}', 1, '{s.Persona}');
+            INSERT INTO negocio.asignacion_unidad(organizacion_id, sucursal_id, vehiculo_id, revision, persona_id) VALUES ('{Org}', '{Suc}', '{unidad}', 1, '{persona}');
             INSERT INTO negocio.ruta(organizacion_id, sucursal_id, id) VALUES ('{Org}', '{Suc}', '{r1}'), ('{Org}', '{Suc}', '{r2}');
             INSERT INTO negocio.ruta_version(organizacion_id, sucursal_id, ruta_id, revision, nombre, dias, vehiculo_id) VALUES
                 ('{Org}', '{Suc}', '{r1}', 1, 'SN-{N(unidad)}-LMV', 21, '{unidad}'), ('{Org}', '{Suc}', '{r2}', 1, 'SN-{N(unidad)}-MJS', 42, '{unidad}');
@@ -123,6 +132,37 @@ public sealed class SanitariosMovilTests(BaseDatosPrueba bd) : IClassFixture<Bas
     private Task<string> CargaAsync(Guid unidad) => bd.ConsultarAsync($"SELECT banos||'|'||m3||'|'||porcentaje FROM negocio.carga_unidad_interna('{Org}','{Suc}','{unidad}')");
     private Task<string> ManifiestosDeTiradaAsync(Guid tirada) => bd.ConsultarAsync($"SELECT count(*) FROM negocio.tirada_manifiesto WHERE tirada_id='{tirada}'");
     private Task<string> FolioDeAsync(Guid tirada) => bd.ConsultarAsync($"SELECT v.numero_manifiesto FROM negocio.version_manifiesto v JOIN negocio.tirada_manifiesto tm ON tm.manifiesto_id=v.manifiesto_id WHERE tm.tirada_id='{tirada}'");
+
+    private async Task<Guid> CargarFirmaEmpresaAsync()
+    {
+        var archivo = Guid.NewGuid();
+        await bd.SqlComoDuenoAsync($"""
+            INSERT INTO negocio.archivo (organizacion_id, sucursal_id, id, sha256, tamano_bytes, mime)
+            VALUES ('{Org}', '{Suc}', '{archivo}', decode(repeat('ef', 32), 'hex'), 100, 'image/png');
+            INSERT INTO negocio.firma_generador_precargada (organizacion_id, sucursal_id, empresa_id, revision, nombre_firmante, archivo_id, es_provisional)
+            SELECT '{Org}', '{Suc}', '{EmpresaNuestra}', coalesce(max(revision), 0) + 1, 'Firma de empresa ficticia', '{archivo}', false
+            FROM negocio.firma_generador_precargada WHERE sucursal_id = '{Suc}' AND empresa_id = '{EmpresaNuestra}';
+            """);
+        return archivo;
+    }
+
+    private async Task<CodigoValidacion> ImprimirTiradaAsync(Sesion movil, Guid captura, Guid manifiesto, HttpClient panel)
+    {
+        using var incompleta = await panel.PrepararImpresionAsync(manifiesto);
+        Assert.Equal(HttpStatusCode.Conflict, incompleta.StatusCode);
+        var op = movil.Yo.Operador;
+        await bd.SqlComoDuenoAsync($"""
+            SELECT sync.registrar_archivo('{Org}', '{op.AccesoId}', '{op.InstalacionId}', e.id, 'image/png', 'prueba/' || e.id)
+            FROM negocio.evidencia_captura e WHERE e.captura_id = '{captura}';
+            """);
+        var firma = await CargarFirmaEmpresaAsync();
+        using var preparada = await panel.PrepararImpresionAsync(manifiesto);
+        Assert.Equal(HttpStatusCode.OK, preparada.StatusCode);
+        var documento = (await preparada.Content.ReadFromJsonAsync<CodigoValidacion>())!;
+        Assert.Equal(firma, documento.Impreso!.GeneradorPrecargado!.ArchivoId);
+        Assert.True(documento.Impreso.GeneradorEsTransportista);
+        return documento;
+    }
 
     [Fact]
     public async Task Succion_con_foto_y_ubicacion_suma_a_la_carga_de_la_unidad_y_el_trabajo_trae_servicio_y_carga()
@@ -299,8 +339,17 @@ public sealed class SanitariosMovilTests(BaseDatosPrueba bd) : IClassFixture<Bas
         Assert.Equal(2, paradas.Count);
         Assert.Equal("Bodega Central", paradas[0].GetProperty("sitio").GetString());   // cronológico: la primera succión
         Assert.Equal(25.6702m, paradas[0].GetProperty("latitud").GetDecimal());
-        Assert.True(san.GetProperty("firmas").GetProperty("generador").GetProperty("provisional").GetBoolean());
         Assert.DoesNotContain("litros", m.GetRawText().ToLowerInvariant());
+        var id = m.GetProperty("id").GetGuid();
+        var documento = await ImprimirTiradaAsync(s, capTirada, id, nav);
+        Assert.Equal(2, documento.Impreso!.Sanitarios!.Paradas.Count);
+        Assert.Equal(25.6702m, documento.Impreso.Sanitarios.Paradas[0].Latitud);
+        await CargarFirmaEmpresaAsync();
+        using var repetir = await nav.PrepararImpresionAsync(id);
+        Assert.Equal(HttpStatusCode.OK, repetir.StatusCode);
+        var reimpreso = (await repetir.Content.ReadFromJsonAsync<CodigoValidacion>())!;
+        Assert.Equal(documento.Codigo, reimpreso.Codigo);
+        Assert.Equal(documento.Impreso.GeneradorPrecargado, reimpreso.Impreso!.GeneradorPrecargado);
     }
 
     [Fact]
@@ -402,6 +451,19 @@ public sealed class SanitariosMovilTests(BaseDatosPrueba bd) : IClassFixture<Bas
         Assert.Equal("false|true|true", await bd.ConsultarAsync($"SELECT string_agg(es_fosa::text, '|' ORDER BY renglon) FROM negocio.manifiesto_parada WHERE captura_id IN ('{c1}','{c2}','{c3}')"));
         // Un solo renglón: «Excreta humana», sanitarios y fosa, 1 m³ (la capacidad de la unidad), 12 contenedores (10 baños + 2 fosas).
         Assert.Equal("Excreta humana|sanitario y fosa|12|1.000000", await bd.ConsultarAsync($"SELECT d.descripcion_residuo||'|'||d.tipo_contenedor||'|'||d.numero_contenedores||'|'||d.cantidad FROM negocio.detalle_manifiesto d JOIN negocio.version_manifiesto v ON v.id=d.version_id JOIN negocio.tirada_manifiesto tm ON tm.manifiesto_id=v.manifiesto_id WHERE tm.tirada_id='{tirada}'"));
+        var correo = $"imprimir-mixta-{Guid.NewGuid():N}@example.invalid";
+        await bd.AutorizarAsync(correo);
+        using var panel = _api.NuevoNavegador();
+        Assert.Equal(HttpStatusCode.NoContent, (await panel.EntrarAsync(ValidadorFicticio.Token($"s-{correo}", correo))).StatusCode);
+        var id = Guid.Parse(await bd.ConsultarAsync($"SELECT manifiesto_id FROM negocio.tirada_manifiesto WHERE tirada_id='{tirada}'"));
+        var documento = await ImprimirTiradaAsync(s, capTirada, id, panel);
+        Assert.Equal(await FolioDeAsync(tirada), documento.Impreso!.Folio);
+        Assert.Equal([false, true, true], documento.Impreso.Sanitarios!.Paradas.Select(p => p.EsFosa));
+        Assert.Equal(1m, documento.Impreso.Sanitarios.Paradas.Sum(p => p.VolumenM3));
+        using var publico = _api.NuevoNavegador();
+        var verificado = (await publico.GetFromJsonAsync<ResultadoValidacion>($"/api/validacion/{documento.Codigo}"))!;
+        Assert.Equal("PTAR NORTE", verificado.Datos!.Destinatario);
+        Assert.Equal(3, verificado.Datos.Firmas);
     }
 
     [Fact]
@@ -457,19 +519,27 @@ public sealed class SanitariosMovilTests(BaseDatosPrueba bd) : IClassFixture<Bas
             INSERT INTO negocio.ficha_vehiculo(organizacion_id, sucursal_id, vehiculo_id, revision, capacidad_id, clasificacion) VALUES ('{Org}', '{Suc}', '{u2}', 1, 4, 'sanitarios');
             """);
         var antes = Guid.NewGuid(); var despues = Guid.NewGuid();
+        var sobreAnterior = Succion(s, e, antes, e.ParadaA, e.Jornada, 10, fecha: Ahora(-60));
         // La captura se HIZO hace una hora; Operaciones cambia la unidad de la ruta ahora; la captura llega después del cambio.
         var cambio = bd.SqlComoDuenoAsync($"""
             INSERT INTO negocio.cambio_unidad_dia(organizacion_id, sucursal_id, ruta_id, fecha, revision, vehiculo_id, persona_id)
             SELECT '{Org}', '{Suc}', ruta_id, '{Hoy}'::date, 1, '{u2}', NULL FROM negocio.jornada WHERE id = '{e.Jornada}';
             """);
         await cambio;
-        Assert.Equal(HttpStatusCode.OK, (await EnviarAsync(s.Http, Succion(s, e, antes, e.ParadaA, e.Jornada, 10, fecha: Ahora(-60)))).StatusCode);
+        using var primera = await EnviarAsync(s.Http, sobreAnterior);
+        using var repetida = await EnviarAsync(s.Http, sobreAnterior);
+        Assert.Equal(HttpStatusCode.OK, primera.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, repetida.StatusCode);
+        Assert.Equal(await primera.Content.ReadAsStringAsync(), await repetida.Content.ReadAsStringAsync());
         // Lo que se hizo antes del cambio se queda con la unidad del plan y no cae a revisión.
         Assert.Equal("0", await bd.ConsultarAsync($"SELECT count(*) FROM negocio.captura_por_revisar WHERE captura_id='{antes}'"));
-        Assert.Equal(e.Unidad.ToString(), await bd.ConsultarAsync($"SELECT vehiculo_id FROM negocio.succion_parada WHERE captura_id='{antes}'"));
+        Assert.Equal($"{e.Unidad}|{s.Persona}", await bd.ConsultarAsync($"SELECT vehiculo_id||'|'||persona_id FROM negocio.succion_parada WHERE captura_id='{antes}'"));
+        Assert.Equal("1", await bd.ConsultarAsync($"SELECT count(*) FROM negocio.succion_parada WHERE captura_id='{antes}'"));
+        Assert.Equal("1", await bd.ConsultarAsync($"SELECT count(*) FROM negocio.evidencia_captura WHERE captura_id='{antes}'"));
         // Lo que se hace después del cambio es de la otra unidad: este teléfono no la opera, así que no se resuelve sin más.
         Assert.Equal(HttpStatusCode.OK, (await EnviarAsync(s.Http, Succion(s, e, despues, e.ParadaA, e.Jornada, 5, fecha: Ahora(5)))).StatusCode);
         Assert.Equal("0", await bd.ConsultarAsync($"SELECT count(*) FROM negocio.succion_parada WHERE captura_id='{despues}'"));
+        Assert.Equal("parada_no_resuelta", await bd.ConsultarAsync($"SELECT motivo FROM negocio.captura_por_revisar WHERE captura_id='{despues}'"));
     }
 
     [Fact]

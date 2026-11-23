@@ -1,3 +1,4 @@
+using System.Data;
 using Npgsql;
 
 namespace Manifiestos.Api.Datos;
@@ -17,12 +18,12 @@ public sealed class TransaccionContexto : IAsyncDisposable
         _transaccion = transaccion;
     }
 
-    public static async Task<TransaccionContexto> AbrirAsync(NpgsqlDataSource datos, Guid organizacion, Guid acceso, CancellationToken ct)
+    public static async Task<TransaccionContexto> AbrirAsync(NpgsqlDataSource datos, Guid organizacion, Guid acceso, CancellationToken ct, IsolationLevel aislamiento = IsolationLevel.ReadCommitted)
     {
         var con = await datos.OpenConnectionAsync(ct);
         try
         {
-            var tx = await con.BeginTransactionAsync(ct);
+            var tx = await con.BeginTransactionAsync(aislamiento, ct);
             await using var cmd = new NpgsqlCommand(
                 "SELECT set_config('app.organizacion_id', $1, true), set_config('app.acceso_id', $2, true)", con, tx);
             cmd.Parameters.AddWithValue(organizacion.ToString());

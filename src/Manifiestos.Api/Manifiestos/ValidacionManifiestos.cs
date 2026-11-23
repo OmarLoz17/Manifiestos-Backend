@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Manifiestos.Api.Acceso;
 using Manifiestos.Api.Datos;
 using Npgsql;
@@ -19,16 +20,18 @@ namespace Manifiestos.Api.Documentos;
 /// <summary>Lo que se congela y firma al imprimir. El orden de las propiedades fija el JSON canónico.</summary>
 public sealed record ContenidoValidacion(
     int V, string Folio, string Tipo, DateTimeOffset Fecha, int Revision, string? Generador, string? Transportista, string? Destinatario,
-    decimal? Cantidad, string? Unidad, string? NumeroEconomico, int Firmas);
+    decimal? Cantidad, string? Unidad, string? NumeroEconomico, int Firmas,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] ManifiestoResumen? Impreso = null);
 
-public sealed record CodigoValidacion(string Codigo, string Huella);
+public sealed record CodigoValidacion(string Codigo, string Huella,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] ManifiestoResumen? Impreso = null);
 public sealed record DatosValidados(string Folio, string Tipo, DateTimeOffset EmitidoEn, string? Generador, string? Transportista, string? Destinatario,
     decimal? Cantidad, string? Unidad, string? NumeroEconomico, int Firmas, string Huella);
 /// <summary>«autentico» | «reemplazado» (hay una versión posterior del manifiesto) | «no_autentico» (sin datos).</summary>
 public sealed record ResultadoValidacion(string Estado, DatosValidados? Datos);
 public sealed record VerificacionImpresa(string? Folio, decimal? Cantidad, string? Destinatario, string? Generador, string? Transportista, int? Firmas);
 public sealed record DiferenciaImpresa(string Campo, string? Impreso, string? Emitido);
-public sealed record ResultadoVerificacion(string Estado, bool Coincide, IReadOnlyList<DiferenciaImpresa> Diferencias);
+public sealed record ResultadoVerificacion(string Estado, bool Coincide, IReadOnlyList<DiferenciaImpresa> Diferencias, IReadOnlyList<string> CamposComparados);
 
 /// <summary>Llave de firma (ECDSA P-256). Se lee de Validacion:LlavePem o de un archivo PEM; si no existe se crea (y debe respaldarse: ver operacion.MD).</summary>
 public sealed class LlaveValidacion
@@ -68,8 +71,9 @@ public sealed class LlaveValidacion
 public interface IServicioValidacion
 {
     Task<CodigoValidacion?> EmitirAsync(Guid organizacion, Guid acceso, Guid manifiesto, CancellationToken ct);
+    Task<CodigoValidacion?> PrepararImpresionAsync(Guid organizacion, Guid acceso, Guid manifiesto, CancellationToken ct);
     Task<ResultadoValidacion> ConsultarAsync(string codigo, string origen, CancellationToken ct);
-    Task<ResultadoVerificacion> VerificarAsync(string codigo, VerificacionImpresa impreso, string origen, CancellationToken ct);
+    Task<ResultadoVerificacion?> VerificarAsync(string codigo, VerificacionImpresa impreso, string origen, CancellationToken ct);
 }
 
 public sealed class ServicioValidacion(NpgsqlDataSource datos, IRepositorioManifiestos manifiestos, LlaveValidacion llave) : IServicioValidacion
@@ -122,6 +126,84 @@ public sealed class ServicioValidacion(NpgsqlDataSource datos, IRepositorioManif
             firmaGuardada = (byte[])(await cmd.ExecuteScalarAsync(ct))!;
         await tx.ConfirmarAsync(ct);
         return new CodigoValidacion($"{Base64Url(id.ToByteArray())}.{Base64Url(firmaGuardada)}", HuellaCorta(huella));
+    }
+
+    public async Task<CodigoValidacion?> PrepararImpresionAsync(Guid organizacion, Guid acceso, Guid manifiesto, CancellationToken ct)
+    {
+        var m = (await manifiestos.ListarAsync(organizacion, acceso, ct)).FirstOrDefault(x => x.Id == manifiesto);
+        if (m is null || string.IsNullOrWhiteSpace(m.Folio)) return null;
+
+        await using var tx = await TransaccionContexto.AbrirAsync(datos, organizacion, acceso, ct);
+        // Serializar la primera impresión por manifiesto. Las reimpresiones leen la misma copia, aunque cambien los datos auxiliares.
+        await using (var cmd = tx.Comando("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", $"impresion-manifiesto:{organizacion}:{m.SucursalId}:{m.Id}"))
+            await cmd.ExecuteNonQueryAsync(ct);
+        await using (var cmd = tx.Comando("""
+            SELECT max(revision) FROM negocio.version_manifiesto WHERE (organizacion_id, sucursal_id, manifiesto_id) = ($1, $2, $3)
+            """, organizacion, m.SucursalId, m.Id))
+            if ((await cmd.ExecuteScalarAsync(ct)) is not int revision || revision != m.Revision) return null;
+
+        Guid? id;
+        await using (var cmd = tx.Comando("""
+            SELECT id FROM negocio.codigo_validacion_manifiesto
+            WHERE (organizacion_id, sucursal_id, manifiesto_id, revision) = ($1, $2, $3, $4) AND contenido::jsonb->>'v' = '2'
+            ORDER BY creada_en, id LIMIT 1
+            """, organizacion, m.SucursalId, m.Id, m.Revision))
+            id = (Guid?)await cmd.ExecuteScalarAsync(ct);
+
+        if (id is null)
+        {
+            var impreso = DatosParaImpresion(m);
+            if (impreso is null) return null;
+            var resumen = Contenido(impreso);
+            var contenido = resumen with { V = 2, Destinatario = resumen.Destinatario ?? impreso.Sanitarios?.Planta, Firmas = 3, Impreso = impreso };
+            var texto = JsonSerializer.Serialize(contenido, Json);
+            var bytes = Encoding.UTF8.GetBytes(texto);
+            await using var cmd = tx.Comando(
+                "SELECT seguridad.registrar_codigo_validacion($1, $2, $3, $4, $5, $6)",
+                m.Id, m.Revision, texto, SHA256.HashData(bytes), llave.Firmar(bytes), llave.LlaveId);
+            id = (Guid)(await cmd.ExecuteScalarAsync(ct))!;
+        }
+
+        CodigoValidacion? resultado = null;
+        await using (var cmd = tx.Comando("SELECT contenido, huella, firma FROM negocio.codigo_validacion_manifiesto WHERE id = $1", id.Value))
+        await using (var r = await cmd.ExecuteReaderAsync(ct))
+            if (await r.ReadAsync(ct))
+            {
+                var texto = r.GetString(0);
+                var huella = (byte[])r.GetValue(1);
+                var firma = (byte[])r.GetValue(2);
+                var bytes = Encoding.UTF8.GetBytes(texto);
+                if (CryptographicOperations.FixedTimeEquals(huella, SHA256.HashData(bytes)) && llave.Verificar(bytes, firma)
+                    && JsonSerializer.Deserialize<ContenidoValidacion>(texto, Json)?.Impreso is { } impreso)
+                    resultado = new CodigoValidacion($"{Base64Url(id.Value.ToByteArray())}.{Base64Url(firma)}", HuellaCorta(huella), impreso);
+            }
+        await tx.ConfirmarAsync(ct);
+        return resultado;
+    }
+
+    private static ManifiestoResumen? DatosParaImpresion(ManifiestoResumen m)
+    {
+        var archivos = m.Evidencias ?? [];
+        var operador = archivos.LastOrDefault(e => e.Rol == "FIRMA_OPERADOR");
+        var recepcion = archivos.LastOrDefault(e => e.Rol == "FIRMA_RECEPCION");
+        var cliente = m.GeneradorEsTransportista ? null : archivos.LastOrDefault(e => e.Rol == "FIRMA_CLIENTE");
+        var firmaEmpresa = m.GeneradorEsTransportista && m.GeneradorPrecargado is { Provisional: false, ArchivoId: not null } ? m.GeneradorPrecargado : null;
+        if (operador is null || recepcion is null || (cliente is null && firmaEmpresa is null)) return null;
+
+        var evidencias = archivos.Where(e => e.Rol == "FOTO" && m.Tipo != "sanitarios").ToList();
+        evidencias.Add(operador);
+        evidencias.Add(recepcion);
+        if (cliente is not null) evidencias.Add(cliente);
+        return m with
+        {
+            ClienteId = null, Cliente = null, Documentos = 0,
+            Participantes = m.Participantes.Select(p => p with { Rfc = null }).ToArray(),
+            Evidencias = evidencias, GeneradorPrecargado = firmaEmpresa,
+            Sanitarios = m.Sanitarios is { } s ? s with
+            {
+                Paradas = s.Paradas.Select(p => p with { Sitio = null, Clientes = 0, NombresClientes = [], FotoArchivoId = null }).ToArray()
+            } : null
+        };
     }
 
     private sealed record Registro(string Contenido, byte[] Huella, byte[] Firma, DateTimeOffset Creada, int Revision, int RevisionActual, Guid Id);
@@ -177,20 +259,43 @@ public sealed class ServicioValidacion(NpgsqlDataSource datos, IRepositorioManif
         return string.Join(' ', sb.ToString().Split(' ', StringSplitOptions.RemoveEmptyEntries));
     }
 
-    public async Task<ResultadoVerificacion> VerificarAsync(string codigo, VerificacionImpresa i, string origen, CancellationToken ct)
+    public async Task<ResultadoVerificacion?> VerificarAsync(string codigo, VerificacionImpresa i, string origen, CancellationToken ct)
     {
+        if (i.Cantidad is < 0 || i.Firmas is < 0 or > 3) return null;
+        string?[] textos = [i.Folio, i.Generador, i.Transportista, i.Destinatario];
+        if (i.Cantidad is null && i.Firmas is null && textos.All(t => Norm(t).Length == 0)) return null;
+
         var g = await LeerAsync(codigo, ct);
-        if (g is null) return new ResultadoVerificacion("no_autentico", false, []);
+        if (g is null) return new ResultadoVerificacion("no_autentico", false, [], []);
         var e = Datos(g);
         var dif = new List<DiferenciaImpresa>();
-        void Texto(string campo, string? impreso, string? emitido) { if (impreso is not null && Norm(impreso) != Norm(emitido)) dif.Add(new DiferenciaImpresa(campo, impreso, emitido)); }
-        Texto("folio", i.Folio, e.Folio); Texto("generador", i.Generador, e.Generador); Texto("transportista", i.Transportista, e.Transportista); Texto("destinatario", i.Destinatario, e.Destinatario);
-        if (i.Cantidad is { } cant && Math.Abs(cant - (e.Cantidad ?? 0m)) >= 0.005m)
-            dif.Add(new DiferenciaImpresa("cantidad", cant.ToString("0.##", CultureInfo.InvariantCulture), (e.Cantidad ?? 0m).ToString("0.##", CultureInfo.InvariantCulture)));
-        if (i.Firmas is { } f && f != e.Firmas) dif.Add(new DiferenciaImpresa("firmas", f.ToString(CultureInfo.InvariantCulture), e.Firmas.ToString(CultureInfo.InvariantCulture)));
+        var campos = new List<string>();
+        void Texto(string campo, string? impreso, string? emitido)
+        {
+            var normalizado = Norm(impreso);
+            if (normalizado.Length == 0) return;
+            campos.Add(campo);
+            if (normalizado != Norm(emitido)) dif.Add(new DiferenciaImpresa(campo, impreso, emitido));
+        }
+        Texto("folio", i.Folio, e.Folio);
+        Texto("generador", i.Generador, e.Generador);
+        Texto("transportista", i.Transportista, e.Transportista);
+        Texto("destinatario", i.Destinatario, e.Destinatario);
+        if (i.Cantidad is { } cant)
+        {
+            campos.Add("cantidad");
+            if (e.Cantidad is null || Math.Abs(cant - e.Cantidad.Value) >= 0.005m)
+                dif.Add(new DiferenciaImpresa("cantidad", cant.ToString("0.##", CultureInfo.InvariantCulture), e.Cantidad?.ToString("0.##", CultureInfo.InvariantCulture)));
+        }
+        if (i.Firmas is { } firmas)
+        {
+            campos.Add("firmas");
+            if (firmas != e.Firmas)
+                dif.Add(new DiferenciaImpresa("firmas", firmas.ToString(CultureInfo.InvariantCulture), e.Firmas.ToString(CultureInfo.InvariantCulture)));
+        }
         var estado = g.RevisionActual > g.Revision ? "reemplazado" : "autentico";
         await RegistrarEscaneoAsync(g.Id, dif.Count == 0 ? "verificacion_coincide" : "verificacion_no_coincide", origen, ct);
-        return new ResultadoVerificacion(estado, dif.Count == 0, dif);
+        return new ResultadoVerificacion(estado, dif.Count == 0, dif, campos);
     }
 }
 
@@ -205,6 +310,16 @@ public static class EndpointsValidacion
 
     public static void MapearValidacion(this IEndpointRouteBuilder app)
     {
+        app.MapPost("/api/manifiestos/{id:guid}/impresion", async (Guid id, HttpContext http, IServicioValidacion validacion) =>
+        {
+            if (!ServiciosAcceso.LeerIds(http.User, out var org, out var acceso)) return Results.Unauthorized();
+            http.Response.Headers.CacheControl = "no-store";
+            var r = await validacion.PrepararImpresionAsync(org, acceso, id, http.RequestAborted);
+            return r is null
+                ? Results.Conflict(new MensajeError("No se pudo preparar el manifiesto. Revisa el folio y las firmas requeridas, o vuelve a intentarlo si acaba de modificarse."))
+                : Results.Ok(r);
+        }).AddEndpointFilter(EndpointsAcceso.ValidarCsrf);
+
         // Panel (con sesión y CSRF): registra y firma lo que se va a imprimir. Imprimir es leer: basta datos.leer sobre el manifiesto.
         app.MapPost("/api/manifiestos/{id:guid}/validacion", async (Guid id, HttpContext http, IServicioValidacion validacion) =>
         {
@@ -225,7 +340,10 @@ public static class EndpointsValidacion
         app.MapPost("/api/validacion/{codigo}/verificar", async (string codigo, VerificacionImpresa cuerpo, HttpContext http, IServicioValidacion validacion) =>
         {
             http.Response.Headers.CacheControl = "no-store";
-            return Results.Ok(await validacion.VerificarAsync(codigo, cuerpo, Origen(http), http.RequestAborted));
+            var resultado = await validacion.VerificarAsync(codigo, cuerpo, Origen(http), http.RequestAborted);
+            return resultado is null
+                ? Results.BadRequest(new MensajeError("Escribe al menos un campo válido para comparar. La cantidad debe ser mayor o igual a cero y el número de firmas debe estar entre 0 y 3."))
+                : Results.Ok(resultado);
         }).AllowAnonymous().RequireRateLimiting(ServiciosAcceso.PoliticaValidacion);
     }
 }
