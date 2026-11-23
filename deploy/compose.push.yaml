@@ -1,0 +1,15 @@
+# Activa los avisos push (Firebase Cloud Messaging) a los teléfonos de los operadores. Se suma a compose.yaml:
+#   docker compose -f compose.yaml [-f compose.ensayo.yaml] [-f compose.drive.yaml] -f compose.push.yaml up -d api
+# Requiere secretos/fcm-servicio.json (JSON de la cuenta de servicio de Firebase del MISMO proyecto que el google-services.json de la app;
+# permisos 644 dentro de la carpeta secretos/ 700, fuera de Git). Sin este archivo el servidor no envía avisos y los teléfonos solo se
+# actualizan con la consulta periódica (cada 5 minutos con la app abierta y cada 15 en segundo plano).
+services:
+  api:
+    environment:
+      Push__CredencialesRuta: /run/secrets/fcm_servicio.json
+    secrets:
+      - source: fcm_servicio
+        target: fcm_servicio.json
+secrets:
+  fcm_servicio:
+    file: "${SECRETOS_DIR:-./secretos}/fcm-servicio.json"
