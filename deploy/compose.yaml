@@ -60,6 +60,8 @@ services:
       Drive__CarpetaRaiz: ${DRIVE_CARPETA_RAIZ:-}
       Push__CredencialesRuta: ${PUSH_CREDENCIALES_RUTA:-}
       # Días que un archivo ya archivado en Drive se conserva en el VPS (0 = no limpiar; mínimo efectivo 7). Solo con Drive activo.
+      # Las llamadas HTTP a Drive (una por archivo) llenarían el registro en nivel Information.
+      Logging__LogLevel__System.Net.Http.HttpClient: Warning
       Archivos__RetencionDias: ${ARCHIVOS_RETENCION_DIAS:-0}
     secrets:
       - source: llave_validacion
