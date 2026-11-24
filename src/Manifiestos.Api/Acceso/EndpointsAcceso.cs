@@ -10,7 +10,7 @@ public sealed record SolicitudGoogle(string? Credential);
 public sealed record RespuestaCsrf(string Token);
 public sealed record RolDto(string Codigo, string Nombre);
 public sealed record SucursalDto(Guid Id, string Nombre);
-public sealed record UsuarioActual(string Nombre, string Correo, RolDto Rol, IReadOnlyList<SucursalDto> Sucursales);
+public sealed record UsuarioActual(string Nombre, string Correo, RolDto Rol, IReadOnlyList<SucursalDto> Sucursales, IReadOnlyDictionary<string, string>? Permisos = null);
 public sealed record MensajeError(string Mensaje);
 
 public static class EndpointsAcceso
@@ -79,7 +79,7 @@ public static class EndpointsAcceso
         return Results.NoContent();
     }
 
-    private static async Task<IResult> ObtenerUsuarioAsync(HttpContext http, IRepositorioAcceso repositorio)
+    private static async Task<IResult> ObtenerUsuarioAsync(HttpContext http, IRepositorioAcceso repositorio, Administracion.IRepositorioAdministracion administracion)
     {
         if (!ServiciosAcceso.LeerIds(http.User, out var org, out var acceso)) return Results.Unauthorized();
         var sesion = http.Items[ServiciosAcceso.ItemSesion] as SesionVigente
@@ -91,7 +91,8 @@ public static class EndpointsAcceso
             http.User.Identity?.Name ?? sesion.Correo,
             sesion.Correo,
             new RolDto(sesion.RolCodigo, sesion.RolNombre),
-            sucursales.Select(s => new SucursalDto(s.Id, s.Nombre)).ToList()));
+            sucursales.Select(s => new SucursalDto(s.Id, s.Nombre)).ToList(),
+            (await administracion.MisPermisosAsync(org, acceso, http.RequestAborted)).Where(p => p.Key != Administracion.PantallasPanel.Explicito).ToDictionary(p => p.Key, p => p.Value)));
     }
 
     private static IResult NoAutorizada() =>

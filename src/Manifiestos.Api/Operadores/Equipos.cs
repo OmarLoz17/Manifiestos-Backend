@@ -88,7 +88,7 @@ public sealed class RepositorioEquipos(NpgsqlDataSource datos) : IRepositorioEqu
 
 public static class EndpointsEquipos
 {
-    public const string MensajeSinPermiso = "No tienes permiso para administrar equipos en esta sucursal.";
+    public const string MensajeSinPermiso = "Solo un administrador puede administrar equipos.";
     public const string MensajeNoDisponible = "La solicitud ya no está disponible.";
     public const string MensajeReasignacion = "Este equipo ya está entregado a otra persona. Confirma la reasignación.";
     public const string MensajeDeshabilitado = "Este equipo está deshabilitado y no se puede aprobar.";
@@ -104,7 +104,9 @@ public static class EndpointsEquipos
         {
             if (!ServiciosAcceso.LeerIds(http.User, out var org, out var acceso)) return Results.Unauthorized();
             http.Response.Headers.CacheControl = "no-store";
-            return Results.Ok(await equipos.ListarAsync(org, acceso, http.RequestAborted));
+            try { return Results.Ok(await equipos.ListarAsync(org, acceso, http.RequestAborted)); }
+            catch (PostgresException e) when (e.SqlState == PostgresErrorCodes.InsufficientPrivilege)
+            { return Results.Json(new MensajeError(MensajeSinPermiso), statusCode: StatusCodes.Status403Forbidden); }
         });
         g.MapPost("/solicitudes/{id:guid}/aprobar", async (Guid id, SolicitudAprobarEquipo? s, HttpContext http, IRepositorioEquipos equipos) =>
         {

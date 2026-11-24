@@ -26,7 +26,7 @@ public sealed class EquiposTests(BaseDatosPrueba bd) : IClassFixture<BaseDatosPr
     private sealed record Estado(string Estado_);
 
     /// <summary>Operador con cuenta autorizada y ficha vigente, SIN equipo (todavía no entregado).</summary>
-    private async Task<Operador> NuevoOperadorAsync(string rol = "telefono_operador", bool activo = true, bool conFicha = true)
+    private async Task<Operador> NuevoOperadorAsync(string rol = "telefono_operador", bool activo = true, bool conFicha = true, bool conEquipoPrevio = true)
     {
         var o = new Operador($"equipo-{Guid.NewGuid():N}@example.invalid", $"s-{Guid.NewGuid():N}", Guid.NewGuid(), $"Operador {Guid.NewGuid():N}"[..20]);
         await bd.AutorizarAsync(o.Correo, rol, activo, conSucursal: false);
@@ -36,13 +36,21 @@ public sealed class EquiposTests(BaseDatosPrueba bd) : IClassFixture<BaseDatosPr
                 INSERT INTO negocio.operador_ficha(organizacion_id,sucursal_id,persona_id,revision,nombre_completo,correo)
                 VALUES('{Org}','{Suc}','{o.Persona}',1,'{o.Nombre}','{o.Correo}');
                 """);
+        // Con un equipo anterior (ya devuelto) el siguiente teléfono necesita aprobación; sin él, el primero se registra solo (0073).
+        if (conFicha && conEquipoPrevio)
+            await bd.SqlComoDuenoAsync($"""
+                WITH d AS (INSERT INTO seguridad.dispositivo(organizacion_id) VALUES('{Org}') RETURNING id)
+                INSERT INTO seguridad.asignacion_equipo(organizacion_id,sucursal_id,dispositivo_id,acceso_id,persona_id,revision,desde,hasta)
+                SELECT '{Org}','{Suc}',d.id,a.id,'{o.Persona}',1,now()-interval '2 days',now()-interval '1 day'
+                FROM d, seguridad.acceso_autorizado a WHERE a.organizacion_id='{Org}' AND a.correo_permitido='{o.Correo}';
+                """);
         return o;
     }
 
     private async Task<HttpClient> PanelAsync(bool escribir)
     {
         var correo = $"panel-{Guid.NewGuid():N}@example.invalid";
-        await bd.AutorizarAsync(correo, escribir: escribir);
+        await bd.AutorizarAsync(correo, escribir ? "administrador" : "operaciones", escribir: escribir);
         var nav = _api.NuevoNavegador();
         Assert.Equal(HttpStatusCode.NoContent, (await nav.EntrarAsync(ValidadorFicticio.Token($"s-{correo}", correo))).StatusCode);
         return nav;
@@ -110,6 +118,65 @@ public sealed class EquiposTests(BaseDatosPrueba bd) : IClassFixture<BaseDatosPr
     }
 
     [Fact]
+    public async Task Primer_equipo_de_la_cuenta_se_registra_solo_y_el_segundo_queda_pendiente()
+    {
+        var o = await NuevoOperadorAsync(conEquipoPrevio: false);
+        var primero = Guid.NewGuid(); var segundo = Guid.NewGuid(); var tel1 = _api.NuevoNavegador(); var tel2 = _api.NuevoNavegador();
+
+        var r = await SolicitarAsync(tel1, o, primero);
+        Assert.Equal(HttpStatusCode.OK, r.StatusCode);
+        Assert.Equal("vinculado", (await r.Content.ReadFromJsonAsync<System.Text.Json.JsonElement>()).GetProperty("estado").GetString());
+        Assert.Equal("0", await PendientesAsync(o));
+        Assert.Equal("1", await bd.ConsultarAsync($"SELECT count(*) FROM seguridad.instalacion_app WHERE id='{primero}' AND habilitada"));
+        Assert.Equal("1", await bd.ConsultarAsync($"SELECT count(*) FROM seguridad.administracion_historial WHERE accion='registro_automatico' AND detalle->>'correo'='{o.Correo}'"));
+        Assert.Equal(HttpStatusCode.OK, (await EntrarAsync(tel1, o, primero)).StatusCode);
+
+        // Repetir en el mismo teléfono no crea nada nuevo.
+        Assert.Equal(HttpStatusCode.OK, (await SolicitarAsync(tel1, o, primero)).StatusCode);
+        Assert.Equal("1", await bd.ConsultarAsync($"SELECT count(*) FROM seguridad.asignacion_equipo ae JOIN seguridad.acceso_autorizado a ON a.id=ae.acceso_id WHERE a.correo_permitido='{o.Correo}'"));
+
+        // Otro teléfono: ya no se registra solo, queda pendiente y no puede entrar.
+        var r2 = await SolicitarAsync(tel2, o, segundo);
+        Assert.Equal("pendiente", (await r2.Content.ReadFromJsonAsync<System.Text.Json.JsonElement>()).GetProperty("estado").GetString());
+        Assert.Equal("0", await bd.ConsultarAsync($"SELECT count(*) FROM seguridad.instalacion_app WHERE id='{segundo}'"));
+        Assert.Equal(HttpStatusCode.Forbidden, (await tel2.PostAsJsonAsync("/api/movil/auth/desafio", new { instalacionId = segundo })).StatusCode);
+        Assert.Equal("1", await PendientesAsync(o));
+    }
+
+    [Fact]
+    public async Task El_registro_automatico_no_aplica_a_cuentas_no_habilitadas_ni_a_equipos_deshabilitados()
+    {
+        var tel = _api.NuevoNavegador();
+        // Sin ficha, inactiva o de Operaciones: nada se registra.
+        foreach (var o in new[] { await NuevoOperadorAsync(conFicha: false), await NuevoOperadorAsync(activo: false, conEquipoPrevio: false), await NuevoOperadorAsync("operaciones", conEquipoPrevio: false) })
+        {
+            var i = Guid.NewGuid();
+            Assert.Equal(HttpStatusCode.Forbidden, (await SolicitarAsync(tel, o, i)).StatusCode);
+            Assert.Equal("0", await bd.ConsultarAsync($"SELECT count(*) FROM seguridad.instalacion_app WHERE id='{i}'"));
+        }
+        // Una instalación que ya existe (deshabilitada) no se reactiva ni se reasigna sola.
+        var cuenta = await NuevoOperadorAsync(conEquipoPrevio: false); var existente = Guid.NewGuid();
+        await bd.SqlComoDuenoAsync($"""
+            WITH d AS (INSERT INTO seguridad.dispositivo(organizacion_id) VALUES('{Org}') RETURNING id)
+            INSERT INTO seguridad.instalacion_app(organizacion_id,id,dispositivo_id,habilitada) SELECT '{Org}','{existente}',d.id,false FROM d;
+            """);
+        Assert.Equal(HttpStatusCode.Forbidden, (await SolicitarAsync(tel, cuenta, existente)).StatusCode);
+        Assert.Equal("0", await bd.ConsultarAsync($"SELECT count(*) FROM seguridad.asignacion_equipo ae JOIN seguridad.acceso_autorizado a ON a.id=ae.acceso_id WHERE a.correo_permitido='{cuenta.Correo}'"));
+    }
+
+    [Fact]
+    public async Task Dos_cuentas_no_comparten_el_primer_equipo()
+    {
+        var a = await NuevoOperadorAsync(conEquipoPrevio: false); var b = await NuevoOperadorAsync(conEquipoPrevio: false);
+        var instalacion = Guid.NewGuid(); var tel = _api.NuevoNavegador();
+        Assert.Equal("vinculado", (await (await SolicitarAsync(tel, a, instalacion)).Content.ReadFromJsonAsync<System.Text.Json.JsonElement>()).GetProperty("estado").GetString());
+        // B intenta en el teléfono de A: ese teléfono ya es de A, no se le entrega solo; queda para aprobación del administrador.
+        var r = await SolicitarAsync(tel, b, instalacion);
+        Assert.Equal("pendiente", (await r.Content.ReadFromJsonAsync<System.Text.Json.JsonElement>()).GetProperty("estado").GetString());
+        Assert.Equal("1", await PendientesAsync(b));
+    }
+
+    [Fact]
     public async Task Solo_correos_autorizados_con_ficha_pueden_solicitar()
     {
         var tel = _api.NuevoNavegador(); var instalacion = Guid.NewGuid();
@@ -150,12 +217,14 @@ public sealed class EquiposTests(BaseDatosPrueba bd) : IClassFixture<BaseDatosPr
     }
 
     [Fact]
-    public async Task Sin_permiso_de_escritura_no_se_aprueba_ni_rechaza()
+    public async Task Solo_el_administrador_ve_aprueba_o_rechaza()
     {
         var o = await NuevoOperadorAsync(); var instalacion = Guid.NewGuid(); var tel = _api.NuevoNavegador();
         Assert.Equal(HttpStatusCode.OK, (await SolicitarAsync(tel, o, instalacion)).StatusCode);
-        using var lector = await PanelAsync(escribir: false);
-        var s = Assert.Single((await ListaAsync(lector)).Solicitudes, x => x.Correo == o.Correo);
+        using var lector = await PanelAsync(escribir: false);   // Operaciones: ya no ve Equipos
+        Assert.Equal(HttpStatusCode.Forbidden, (await lector.GetAsync("/api/equipos")).StatusCode);
+        using var admin = await PanelAsync(escribir: true);
+        var s = Assert.Single((await ListaAsync(admin)).Solicitudes, x => x.Correo == o.Correo);
         Assert.Equal(HttpStatusCode.Forbidden, (await PostPanelAsync(lector, $"/api/equipos/solicitudes/{s.Id}/aprobar")).StatusCode);
         Assert.Equal(HttpStatusCode.Forbidden, (await PostPanelAsync(lector, $"/api/equipos/solicitudes/{s.Id}/rechazar")).StatusCode);
         Assert.Equal("1", await PendientesAsync(o));

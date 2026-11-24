@@ -1,6 +1,7 @@
 using Manifiestos.Api;
 using Manifiestos.Api.Archivos;
 using Manifiestos.Api.Acceso;
+using Manifiestos.Api.Administracion;
 using Manifiestos.Api.Clientes;
 using Manifiestos.Api.Rutas;
 using Manifiestos.Api.Geografia;
@@ -29,6 +30,7 @@ builder.Services.AgregarPlantas();
 builder.Services.AgregarGeografia();
 builder.Services.AgregarUnidades();
 builder.Services.AgregarOperadores();
+builder.Services.AgregarAdministracion();
 builder.Services.AgregarManifiestos();
 builder.Services.AgregarValidacionManifiestos();
 builder.Services.AgregarIncidencias();
@@ -46,6 +48,7 @@ if (app.Environment.IsProduction()) _ = app.Services.GetRequiredService<Manifies
 app.UseForwardedHeaders();
 app.UseAuthentication();
 app.UseAuthorization();
+app.UsarPermisosPorPantalla();
 app.UseRateLimiter();
 
 app.MapearSalud();
@@ -59,6 +62,7 @@ app.MapearPlantas();
 app.MapearGeografia();
 app.MapearUnidades();
 app.MapearOperadores();
+app.MapearAdministracion();
 app.MapearManifiestos();
 app.MapearValidacion();
 app.MapearIncidencias();
