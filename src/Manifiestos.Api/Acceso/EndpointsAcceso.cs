@@ -90,10 +90,13 @@ public static class EndpointsAcceso
         return Results.Ok(new UsuarioActual(
             http.User.Identity?.Name ?? sesion.Correo,
             sesion.Correo,
-            new RolDto(sesion.RolCodigo, sesion.RolNombre),
+            new RolDto(sesion.RolCodigo, NombreDeRol(sesion.RolCodigo, sesion.RolNombre)),
             sucursales.Select(s => new SucursalDto(s.Id, s.Nombre)).ToList(),
             (await administracion.MisPermisosAsync(org, acceso, http.RequestAborted)).Where(p => p.Key != Administracion.PantallasPanel.Explicito).ToDictionary(p => p.Key, p => p.Value)));
     }
+
+    /// <summary>El catálogo es inmutable y aún dice «provisional» en los roles (migraciones 0006 y 0034); la pantalla muestra el nombre vigente.</summary>
+    private static string NombreDeRol(string codigo, string nombre) => nombre.Replace(" (provisional, PG-11)", "", StringComparison.Ordinal);
 
     private static IResult NoAutorizada() =>
         Results.Json(new MensajeError(MensajeNoAutorizada), statusCode: StatusCodes.Status403Forbidden);

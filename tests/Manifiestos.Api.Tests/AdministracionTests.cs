@@ -52,6 +52,9 @@ public sealed class AdministracionTests(BaseDatosPrueba bd) : IClassFixture<Base
     public async Task Operaciones_no_ve_ni_cambia_cuentas_ni_equipos()
     {
         var op = await EntrarAsync("operaciones");
+        Assert.Equal("Operaciones", (await op.Nav.GetFromJsonAsync<UsuarioActual>("/api/auth/me"))!.Rol.Nombre);
+        var adm = await EntrarAsync("administrador");
+        Assert.Equal("Administrador", (await adm.Nav.GetFromJsonAsync<UsuarioActual>("/api/auth/me"))!.Rol.Nombre);   // sin «provisional»
         Assert.Equal(HttpStatusCode.Forbidden, (await op.Nav.GetAsync("/api/admin/cuentas")).StatusCode);
         Assert.Equal(HttpStatusCode.Forbidden, (await op.Nav.GetAsync("/api/equipos")).StatusCode);
         Assert.Equal(HttpStatusCode.Forbidden, (await EnviarAsync(op.Nav, HttpMethod.Post, "/api/admin/cuentas", Cuenta("x@example.invalid", "operaciones", ("rutas", "ver")))).StatusCode);
