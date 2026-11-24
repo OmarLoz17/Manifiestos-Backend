@@ -52,6 +52,8 @@ services:
     environment:
       Acceso__GoogleClientId: ${GOOGLE_CLIENT_ID:?Falta GOOGLE_CLIENT_ID en .env}
       Acceso__OrganizacionId: ${ORGANIZACION_ID:?Falta ORGANIZACION_ID en .env}
+      # Dominios con los que se acepta la petición, separados por «;» (p. ej. manifiestos.armultiservicios.mx;localhost;127.0.0.1). «*» = cualquiera (valor por omisión: no cambia nada hasta que se fije en el .env).
+      AllowedHosts: ${HOSTS_PERMITIDOS:-*}
       Validacion__RutaLlave: /run/secrets/llave_validacion.pem
       # Solo el nginx del paquete (IP fija en la red privada) puede declarar la IP y el esquema del cliente.
       Manifiestos__ProxyConfiable__Redes__0: ${SUBRED_PRIVADA:-172.30.0.0/24}

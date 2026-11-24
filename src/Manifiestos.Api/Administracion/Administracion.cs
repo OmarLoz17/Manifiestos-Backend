@@ -166,6 +166,14 @@ public static class PantallasPanel
     /// <summary>Marca que devuelve mis_permisos cuando la cuenta ya tiene permisos por pantalla.</summary>
     public const string Explicito = "_explicito";
 
+    /// <summary>Las fotos y firmas se ven desde estas pantallas (Incidencias, Manifiestos, Órdenes/Monitoreo y Rutas, que muestra lo del día): sin acceso a ninguna, la evidencia tampoco se sirve.</summary>
+    private static readonly string[] ConsumidorasDeArchivos = ["incidencias", "manifiestos", "monitoreo", "rutas"];
+
+    public static bool EsArchivo(PathString ruta) => ruta.StartsWithSegments("/api/archivos", StringComparison.OrdinalIgnoreCase);
+
+    public static bool PermitidoArchivo(IReadOnlyDictionary<string, string> permisos) =>
+        ConsumidorasDeArchivos.Any(p => permisos.TryGetValue(p, out var n) && n != "sin");
+
     public static string? De(PathString ruta)
     {
         foreach (var (prefijo, pantalla) in Prefijos)
@@ -198,14 +206,16 @@ public static class EndpointsAdministracion
         app.Use(async (http, next) =>
         {
             var pantalla = PantallasPanel.De(http.Request.Path);
-            if (pantalla is not null && ServiciosAcceso.LeerIds(http.User, out var org, out var acceso))
+            var esArchivo = PantallasPanel.EsArchivo(http.Request.Path);
+            if ((pantalla is not null || esArchivo) && ServiciosAcceso.LeerIds(http.User, out var org, out var acceso))
             {
                 var repo = http.RequestServices.GetRequiredService<IRepositorioAdministracion>();
                 var permisos = await repo.MisPermisosAsync(org, acceso, http.RequestAborted);
                 // Cuentas anteriores a 0072 (sin permisos por pantalla): decide cada endpoint con datos.leer / datos.escribir.
                 if (!permisos.ContainsKey(PantallasPanel.Explicito)) { await next(); return; }
                 var lectura = HttpMethods.IsGet(http.Request.Method) || HttpMethods.IsHead(http.Request.Method);
-                if (!PantallasPanel.Permitido(pantalla, lectura, permisos))
+                var permitido = esArchivo ? PantallasPanel.PermitidoArchivo(permisos) : PantallasPanel.Permitido(pantalla!, lectura, permisos);
+                if (!permitido)
                 {
                     http.Response.StatusCode = StatusCodes.Status403Forbidden;
                     await http.Response.WriteAsJsonAsync(new MensajeError("Tu cuenta no tiene permiso para esta pantalla."), http.RequestAborted);
