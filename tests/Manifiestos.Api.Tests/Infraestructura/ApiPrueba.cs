@@ -59,6 +59,7 @@ public sealed class DriveFicticio : Manifiestos.Api.Archivos.IAlmacenDrive
 
 public sealed class ApiPrueba(BaseDatosPrueba bd) : WebApplicationFactory<Program>
 {
+    public bool ExigirAceptacion { get; init; }
     public EmisorFicticio Emisor { get; } = new();
     public DriveFicticio Drive { get; } = new();
 
@@ -90,6 +91,8 @@ public sealed class ApiPrueba(BaseDatosPrueba bd) : WebApplicationFactory<Progra
         builder.UseSetting("Acceso:GoogleClientId", "cliente-ficticio.apps.googleusercontent.com");
         builder.UseSetting("Acceso:OrganizacionId", Organizacion.ToString());
         builder.UseSetting("Acceso:IntentosPorMinuto", "1000");
+        // La exigencia de aceptar términos se apaga salvo en las pruebas que la ejercen (AceptacionTerminosTests).
+        builder.UseSetting("Legal:ExigirAceptacion", ExigirAceptacion ? "true" : "false");
         builder.ConfigureTestServices(s => { s.AddSingleton<IValidadorTokenGoogle, ValidadorFicticio>(); s.AddSingleton<Manifiestos.Api.Avisos.IEmisorPush>(Emisor); s.AddSingleton<Manifiestos.Api.Archivos.IAlmacenDrive>(Drive); });
     }
 

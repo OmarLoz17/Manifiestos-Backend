@@ -142,6 +142,8 @@ public static class AccesoMovil
     public const string Politica = "operador-movil-vigente";
     private const string ClaimSesion = "manifiestos:sesion-movil";
     private const string ItemContexto = "manifiestos:operador-movil";
+    /// <summary>Clave de HttpContext.Items con el operador ya validado (la usa la exigencia de aceptación de términos).</summary>
+    public const string ItemContextoPublico = ItemContexto;
 
     public static IServiceCollection AgregarAccesoMovil(this IServiceCollection services)
     {

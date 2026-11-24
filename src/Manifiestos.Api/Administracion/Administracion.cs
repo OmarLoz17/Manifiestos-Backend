@@ -16,7 +16,7 @@ public sealed record PermisoCuenta(Guid SucursalId, string Pantalla, string Nive
 /// <summary>Cuenta con acceso al sistema. Tipo: administrador, operaciones (panel) o telefono_operador (app).</summary>
 public sealed record CuentaAdmin(
     Guid Id, string Correo, string Nombre, string Tipo, bool Activo, bool PrimerAcceso, DateTime? UltimoAcceso,
-    string? Equipo, string? Unidad, IReadOnlyList<PermisoCuenta> Permisos);
+    string? Equipo, string? Unidad, IReadOnlyList<PermisoCuenta> Permisos, string? TerminosVersion = null, DateTime? TerminosEn = null, bool TerminosVigentes = false);
 
 public sealed record Deshabilitado(string Tipo, Guid Id, string Nombre, string? Detalle, DateTime? Desde, string? Por);
 
@@ -51,12 +51,14 @@ public sealed class RepositorioAdministracion(NpgsqlDataSource datos) : IReposit
     {
         await using var tx = await TransaccionContexto.AbrirAsync(datos, org, acceso, ct);
         var lista = new List<CuentaAdmin>();
-        await using (var cmd = tx.Comando("SELECT acceso_id, correo, nombre, rol_codigo, activo, primer_acceso, ultimo_acceso, equipo, unidad, permisos::text FROM seguridad.admin_cuentas($1)", org))
+        await using (var cmd = tx.Comando("SELECT acceso_id, correo, nombre, rol_codigo, activo, primer_acceso, ultimo_acceso, equipo, unidad, permisos::text, terminos_version, terminos_en FROM seguridad.admin_cuentas($1)", org))
         await using (var r = await cmd.ExecuteReaderAsync(ct))
             while (await r.ReadAsync(ct))
                 lista.Add(new CuentaAdmin(r.GetGuid(0), r.GetString(1), r.GetString(2), r.GetString(3), r.GetBoolean(4), r.GetBoolean(5),
                     r.IsDBNull(6) ? null : r.GetDateTime(6), r.IsDBNull(7) ? null : r.GetString(7), r.IsDBNull(8) ? null : r.GetString(8),
-                    JsonSerializer.Deserialize<List<PermisoCuenta>>(r.GetString(9), Json) ?? []));
+                    JsonSerializer.Deserialize<List<PermisoCuenta>>(r.GetString(9), Json) ?? [],
+                    r.IsDBNull(10) ? null : r.GetString(10), r.IsDBNull(11) ? null : r.GetDateTime(11),
+                    !r.IsDBNull(10) && r.GetString(10) == Legal.DocumentosLegalesVigentes.Todos.First(d => d.Id == "terminos").Version));
         await tx.ConfirmarAsync(ct);
         return lista;
     }
