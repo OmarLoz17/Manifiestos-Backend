@@ -159,13 +159,21 @@ BEGIN
     DELETE FROM seguridad.permiso_pantalla WHERE organizacion_id = o AND acceso_id = a;
     DELETE FROM seguridad.permiso_sucursal WHERE organizacion_id = o AND acceso_id = a;
     IF p_rol = 'administrador' THEN
-        -- Todo en todas las sucursales de la organización (dashboard y reportes, solo ver).
-        FOR s IN SELECT su.id FROM negocio.sucursal su WHERE su.organizacion_id = o LOOP
+        -- Todo en las sucursales elegidas (dashboard y reportes, solo ver). Una sucursal que no existe se rechaza.
+        IF jsonb_typeof(p_permisos) IS DISTINCT FROM 'array' THEN RAISE EXCEPTION 'permisos_invalidos' USING ERRCODE = 'P0422'; END IF;
+        IF EXISTS (SELECT 1 FROM jsonb_array_elements(p_permisos) e
+                   WHERE NOT EXISTS (SELECT 1 FROM negocio.sucursal su WHERE su.organizacion_id = o AND su.id = (e ->> 'sucursalId')::uuid)) THEN
+            RAISE EXCEPTION 'sucursal_invalida' USING ERRCODE = 'P0422';
+        END IF;
+        FOR s IN SELECT su.id FROM negocio.sucursal su WHERE su.organizacion_id = o
+                 AND su.id IN (SELECT (e ->> 'sucursalId')::uuid FROM jsonb_array_elements(p_permisos) e) LOOP
+            alguna := true;
             FOREACH pant IN ARRAY p LOOP
                 INSERT INTO seguridad.permiso_pantalla VALUES (o, s.id, a, pant, CASE WHEN pant IN ('dashboard', 'reportes') THEN 'ver' ELSE 'editar' END);
             END LOOP;
             INSERT INTO seguridad.permiso_sucursal VALUES (o, s.id, a, 'datos.leer'), (o, s.id, a, 'datos.escribir');
         END LOOP;
+        IF NOT alguna THEN RAISE EXCEPTION 'sin_acceso' USING ERRCODE = 'P0422'; END IF;
     ELSE
         IF jsonb_typeof(p_permisos) IS DISTINCT FROM 'array' THEN RAISE EXCEPTION 'permisos_invalidos' USING ERRCODE = 'P0422'; END IF;
         FOR q IN SELECT (e ->> 'sucursalId')::uuid AS sucursal, e -> 'pantallas' AS pantallas FROM jsonb_array_elements(p_permisos) e LOOP

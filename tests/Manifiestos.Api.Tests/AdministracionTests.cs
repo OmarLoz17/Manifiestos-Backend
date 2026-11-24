@@ -317,4 +317,44 @@ public sealed class AdministracionTests(BaseDatosPrueba bd) : IClassFixture<Base
         Assert.Equal(HttpStatusCode.Unauthorized, (await _api.NuevoNavegador().GetAsync("/api/admin/cuentas")).StatusCode);
         Assert.Equal(HttpStatusCode.Unauthorized, (await _api.NuevoNavegador().GetAsync("/api/admin/deshabilitados")).StatusCode);
     }
+
+    [Fact]
+    public async Task Administrador_se_crea_en_las_sucursales_elegidas_y_exige_al_menos_una_valida()
+    {
+        var admin = await EntrarAsync("administrador"); await ConfirmarAsync(admin);
+        var correo = $"adm-suc-{Guid.NewGuid():N}@example.invalid";
+        object Con(params Guid[] sucursales) => new { correo, nombre = "Admin de prueba", tipo = "administrador", permisos = sucursales.Select(x => new { sucursalId = x, pantallas = new Dictionary<string, string>() }).ToArray() };
+        Assert.Equal(HttpStatusCode.BadRequest, (await EnviarAsync(admin.Nav, HttpMethod.Post, "/api/admin/cuentas", Con())).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await EnviarAsync(admin.Nav, HttpMethod.Post, "/api/admin/cuentas", Con(Guid.NewGuid()))).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await EnviarAsync(admin.Nav, HttpMethod.Post, "/api/admin/cuentas", Con(Suc))).StatusCode);
+        Assert.Equal("1", await bd.ConsultarAsync($"SELECT count(DISTINCT sucursal_id) FROM seguridad.permiso_sucursal p JOIN seguridad.acceso_autorizado a ON a.id=p.acceso_id WHERE a.correo_permitido='{correo}' AND p.permiso='datos.escribir'"));
+    }
+
+    [Fact]
+    public async Task Una_cuenta_de_una_sucursal_no_ve_ni_escribe_en_otra()
+    {
+        var suc2 = Guid.Parse("0f000000-0000-4000-8000-0000000000b2");
+        var persona = Guid.NewGuid(); var nombre = $"Operador Ajeno {persona:N}";
+        await bd.SqlComoDuenoAsync($"""
+            INSERT INTO negocio.sucursal(organizacion_id, id, empresa_id, codigo, nombre)
+            VALUES ('{BaseDatosPrueba.Organizacion}', '{suc2}', '0f000000-0000-4000-8000-000000000002', 'ADM2', 'Otra sucursal ficticia') ON CONFLICT DO NOTHING;
+            INSERT INTO seguridad.persona(organizacion_id,id,nombre_completo) VALUES('{BaseDatosPrueba.Organizacion}','{persona}','{nombre}');
+            INSERT INTO negocio.operador_ficha(organizacion_id,sucursal_id,persona_id,revision,nombre_completo,correo)
+            VALUES('{BaseDatosPrueba.Organizacion}','{suc2}','{persona}',1,'{nombre}','ajeno-{persona:N}@example.invalid');
+            """);
+        var admin = await EntrarAsync("administrador"); await ConfirmarAsync(admin);
+        var correo = $"solo-suc-{Guid.NewGuid():N}@example.invalid";
+        Assert.Equal(HttpStatusCode.OK, (await EnviarAsync(admin.Nav, HttpMethod.Post, "/api/admin/cuentas", Cuenta(correo, "operaciones", ("operadores", "editar"), ("clientes", "editar"), ("unidades", "editar"), ("rutas", "editar"), ("manifiestos", "ver")))).StatusCode);
+        var nav = _api.NuevoNavegador();
+        await nav.EntrarAsync(ValidadorFicticio.Token($"s-{correo}", correo));
+
+        var yo = (await nav.GetFromJsonAsync<UsuarioActual>("/api/auth/me"))!;
+        Assert.Equal([Suc], yo.Sucursales.Select(x => x.Id));
+        Assert.DoesNotContain(nombre, await nav.GetStringAsync("/api/operadores"));
+        foreach (var url in new[] { "/api/clientes", "/api/unidades", "/api/rutas", "/api/manifiestos" })
+            Assert.DoesNotContain(suc2.ToString(), await nav.GetStringAsync(url));
+        // Escribir en la sucursal ajena se rechaza aunque la pantalla sea «Ver y editar».
+        var r = await EnviarAsync(nav, HttpMethod.Post, "/api/operadores", new { sucursalId = suc2, nombre = "Intruso", cargo = (string?)null, correo = (string?)null });
+        Assert.NotEqual(HttpStatusCode.OK, r.StatusCode); Assert.NotEqual(HttpStatusCode.Created, r.StatusCode);
+    }
 }
