@@ -53,6 +53,9 @@ public sealed record SolicitudAjusteFosas(Guid? RutaId, string? Fecha, Guid? Par
 /// <summary>«No se hará hoy» (decisión 0031): toda la ruta (sin ParadaId) o una parada de HOY o de un día próximo; NoSeHara=false lo deshace. Nunca reagenda ni toca lo capturado.</summary>
 public sealed record SolicitudNoSeHara(Guid? RutaId, string? Fecha, Guid? ParadaId, bool? NoSeHara);
 
+/// <summary>«No se hará» sobre una parada que quedó pendiente de AYER (decisión 0045): se le quita hoy al operador; false lo devuelve.</summary>
+public sealed record SolicitudPendienteDescartado(Guid? RutaId, Guid? ParadaId, bool? NoSeHara);
+
 /// <summary>Cambio de unidad y/o de operador de la ruta solo para ese día (extraordinario). PersonaId vacío = el operador asignado a esa unidad.</summary>
 public sealed record SolicitudCambioUnidad(Guid? RutaId, string? Fecha, Guid? VehiculoId, Guid? PersonaId);
 
@@ -71,6 +74,7 @@ public interface IRepositorioOrdenes
     Task<ResultadoEscritura> AgregarExtraordinariaAsync(Guid organizacion, Guid acceso, Guid ruta, DateOnly fecha, Guid sitio, IReadOnlyList<DatosClienteParada> clientes, Guid? claveSolicitud, CancellationToken ct);
     Task<ResultadoEscritura> CambiarUnidadAsync(Guid organizacion, Guid acceso, Guid ruta, DateOnly fecha, Guid vehiculo, Guid? persona, CancellationToken ct);
     Task<ResultadoEscritura> MarcarNoSeHaraAsync(Guid organizacion, Guid acceso, Guid ruta, DateOnly fecha, Guid? parada, bool activo, CancellationToken ct);
+    Task<ResultadoEscritura> DescartarPendienteAsync(Guid organizacion, Guid acceso, Guid ruta, DateOnly ayer, Guid parada, bool activo, CancellationToken ct);
     Task<ResultadoEscritura> AjustarBanosAsync(Guid organizacion, Guid acceso, Guid ruta, DateOnly fecha, Guid parada, Guid cliente, int banos, CancellationToken ct);
     Task<ResultadoEscritura> AjustarFosasAsync(Guid organizacion, Guid acceso, Guid ruta, DateOnly fecha, Guid parada, Guid cliente, int fosas, CancellationToken ct);
 }
@@ -459,6 +463,36 @@ public sealed class RepositorioOrdenes(NpgsqlDataSource datos) : IRepositorioOrd
     }
 
     /// <summary>Cambia los baños de un cliente en una parada del plan SOLO para esa fecha (historial; el plan fijo no se toca).</summary>
+    public async Task<ResultadoEscritura> DescartarPendienteAsync(Guid organizacion, Guid acceso, Guid ruta, DateOnly ayer, Guid parada, bool activo, CancellationToken ct)
+    {
+        await using var tx = await TransaccionContexto.AbrirAsync(datos, organizacion, acceso, ct);
+        Guid sucursal, jornada;
+        await using (var cmd = tx.Comando("""
+            SELECT j.sucursal_id, j.id FROM negocio.jornada j
+            WHERE j.organizacion_id = $1 AND j.ruta_id = $2 AND j.fecha = $3
+              AND EXISTS (SELECT 1 FROM negocio.parada p WHERE (p.organizacion_id, p.sucursal_id, p.ruta_id, p.id) = (j.organizacion_id, j.sucursal_id, j.ruta_id, $4))
+            """, organizacion, ruta, ayer, parada))
+        {
+            await using var r = await cmd.ExecuteReaderAsync(ct);
+            if (!await r.ReadAsync(ct)) return ResultadoEscritura.NoEncontrada;
+            (sucursal, jornada) = (r.GetGuid(0), r.GetGuid(1));
+        }
+        await using (var cmd = tx.Comando("SELECT coalesce(seguridad.puede($1, $2, 'datos.escribir'), false)", organizacion, sucursal))
+            if (!(bool)(await cmd.ExecuteScalarAsync(ct))!) return ResultadoEscritura.SinPermiso;
+        // Serializa las revisiones de la misma parada.
+        await using (var cmd = tx.Comando("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", $"pendiente:{jornada}:{parada}"))
+            await cmd.ExecuteNonQueryAsync(ct);
+        await using (var cmd = tx.Comando("""
+            INSERT INTO negocio.pendiente_descartado (organizacion_id, sucursal_id, jornada_id, parada_id, revision, activo)
+            SELECT $1, $2, $3, $4, coalesce(max(d.revision), 0) + 1, $5 FROM negocio.pendiente_descartado d
+            WHERE (d.organizacion_id, d.sucursal_id, d.jornada_id, d.parada_id) = ($1, $2, $3, $4)
+            HAVING coalesce((SELECT x.activo FROM negocio.pendiente_descartado x WHERE (x.organizacion_id, x.sucursal_id, x.jornada_id, x.parada_id) = ($1, $2, $3, $4) ORDER BY x.revision DESC LIMIT 1), false) <> $5
+            """, organizacion, sucursal, jornada, parada, activo))
+            await cmd.ExecuteNonQueryAsync(ct);
+        await tx.ConfirmarAsync(ct);
+        return ResultadoEscritura.Correcta(parada, 0);
+    }
+
     public Task<ResultadoEscritura> AjustarBanosAsync(Guid organizacion, Guid acceso, Guid ruta, DateOnly fecha, Guid parada, Guid cliente, int banos, CancellationToken ct) =>
         AjustarAsync(organizacion, acceso, ruta, fecha, parada, cliente, banos, false, ct);
 
@@ -755,6 +789,29 @@ public static class EndpointsOrdenes
             IResult Avisar()
             {
                 _ = Task.Run(() => avisos.AvisarAsync(ruta, fecha, "Operaciones actualizó tu trabajo de hoy."));
+                return Results.NoContent();
+            }
+        }).AddEndpointFilter(EndpointsAcceso.ValidarCsrf);
+
+        // «No se hará» sobre un pendiente de ayer (decisión 0045).
+        app.MapPut("/api/ordenes/pendientes-ayer/no-se-hara", async (SolicitudPendienteDescartado s, HttpContext http, IRepositorioOrdenes ordenes, Avisos.AvisosTrabajo avisos) =>
+        {
+            if (!ServiciosAcceso.LeerIds(http.User, out var org, out var acceso)) return Results.Unauthorized();
+            if (s.RutaId is not { } ruta || ruta == Guid.Empty) return Results.BadRequest(new MensajeError("Elige la ruta."));
+            if (s.ParadaId is not { } parada || parada == Guid.Empty) return Results.BadRequest(new MensajeError("Elige la parada."));
+            if (s.NoSeHara is not { } activo) return Results.BadRequest(new MensajeError("Indica si no se hará o sí se hará."));
+            var ayer = Avisos.AvisosTrabajo.HoyLocal().AddDays(-1);
+            var r = await ordenes.DescartarPendienteAsync(org, acceso, ruta, ayer, parada, activo, http.RequestAborted);
+            return r.Estado switch
+            {
+                EstadoEscritura.Correcta => Avisar(),
+                EstadoEscritura.NoEncontrada => Results.Json(new MensajeError("No se encontró ese pendiente de ayer."), statusCode: StatusCodes.Status404NotFound),
+                EstadoEscritura.SinPermiso => Results.Json(new MensajeError(MensajeSinPermiso), statusCode: StatusCodes.Status403Forbidden),
+                _ => Results.BadRequest(new MensajeError(r.Mensaje!)),
+            };
+            IResult Avisar()
+            {
+                _ = Task.Run(() => avisos.AvisarAsync(ruta, Avisos.AvisosTrabajo.HoyLocal(), "Operaciones actualizó tus pendientes de ayer."));
                 return Results.NoContent();
             }
         }).AddEndpointFilter(EndpointsAcceso.ValidarCsrf);

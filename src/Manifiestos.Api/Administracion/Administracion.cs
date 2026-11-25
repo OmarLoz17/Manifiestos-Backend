@@ -26,6 +26,11 @@ public sealed record SolicitudCuenta(string? Correo, string? Nombre, string? Tip
 public sealed record SolicitudEstado(bool Activo);
 public sealed record SolicitudConfirmacion(string? Credential);
 
+/// <summary>«Pendientes de ayer» (decisión 0045): el general y el valor efectivo de cada cuenta de teléfono activa.</summary>
+public sealed record AjustePendientesDeCuenta(Guid CuentaId, bool Activo);
+public sealed record AjustePendientes(bool General, IReadOnlyList<AjustePendientesDeCuenta> Cuentas);
+public sealed record SolicitudPendientes(Guid? CuentaId, bool? Activo);
+
 public enum ResultadoAdmin { Ok, SinPermiso, NoEncontrada, Invalida, Conflicto }
 
 public sealed record RespuestaAdmin<T>(ResultadoAdmin Resultado, string? Motivo, T? Valor);
@@ -37,6 +42,8 @@ public interface IRepositorioAdministracion
     Task<RespuestaAdmin<Guid>> GuardarCuentaAsync(Guid org, Guid acceso, Guid? cuenta, SolicitudCuenta s, CancellationToken ct);
     Task<RespuestaAdmin<bool>> EstadoCuentaAsync(Guid org, Guid acceso, Guid cuenta, bool activo, CancellationToken ct);
     Task<RespuestaAdmin<bool>> EstadoEquipoAsync(Guid org, Guid acceso, Guid dispositivo, bool habilitado, CancellationToken ct);
+    Task<AjustePendientes> PendientesAyerAsync(Guid org, Guid acceso, CancellationToken ct);
+    Task<RespuestaAdmin<bool>> GuardarPendientesAyerAsync(Guid org, Guid acceso, Guid? cuenta, bool activo, CancellationToken ct);
     Task<bool> SesionConfirmadaAsync(Guid org, Guid acceso, Guid sesion, CancellationToken ct);
     Task<bool> ConfirmarIdentidadAsync(Guid org, Guid acceso, Guid sesion, IdentidadGoogle identidad, CancellationToken ct);
     Task<IReadOnlyDictionary<string, string>> MisPermisosAsync(Guid org, Guid acceso, CancellationToken ct);
@@ -97,6 +104,28 @@ public sealed class RepositorioAdministracion(NpgsqlDataSource datos) : IReposit
         EjecutarAsync<bool>(org, acceso, async tx =>
         {
             await using var cmd = tx.Comando("SELECT seguridad.admin_estado_equipo($1, $2, $3)", org, dispositivo, habilitado);
+            await cmd.ExecuteNonQueryAsync(ct);
+            return true;
+        }, ct);
+
+    public async Task<AjustePendientes> PendientesAyerAsync(Guid org, Guid acceso, CancellationToken ct)
+    {
+        await using var tx = await TransaccionContexto.AbrirAsync(datos, org, acceso, ct);
+        var general = true;
+        var cuentas = new List<AjustePendientesDeCuenta>();
+        await using (var cmd = tx.Comando("SELECT acceso_id, activo FROM seguridad.admin_pendientes_ayer($1)", org))
+        await using (var r = await cmd.ExecuteReaderAsync(ct))
+            while (await r.ReadAsync(ct))
+                if (r.IsDBNull(0)) general = r.GetBoolean(1);
+                else cuentas.Add(new AjustePendientesDeCuenta(r.GetGuid(0), r.GetBoolean(1)));
+        await tx.ConfirmarAsync(ct);
+        return new AjustePendientes(general, cuentas);
+    }
+
+    public Task<RespuestaAdmin<bool>> GuardarPendientesAyerAsync(Guid org, Guid acceso, Guid? cuenta, bool activo, CancellationToken ct) =>
+        EjecutarAsync<bool>(org, acceso, async tx =>
+        {
+            await using var cmd = tx.Comando("SELECT seguridad.admin_guardar_pendientes_ayer($1, $2::uuid, $3)", org, (object?)cuenta ?? DBNull.Value, activo);
             await cmd.ExecuteNonQueryAsync(ct);
             return true;
         }, ct);
@@ -231,6 +260,13 @@ public static class EndpointsAdministracion
 
         g.MapGet("/cuentas", (HttpContext http, IRepositorioAdministracion r) => Leer(http, async (o, a, ct) => Results.Ok(await r.CuentasAsync(o, a, ct))));
         g.MapGet("/deshabilitados", (HttpContext http, IRepositorioAdministracion r) => Leer(http, async (o, a, ct) => Results.Ok(await r.DeshabilitadosAsync(o, a, ct))));
+
+        g.MapGet("/pendientes-ayer", (HttpContext http, IRepositorioAdministracion r) => Leer(http, async (o, a, ct) => Results.Ok(await r.PendientesAyerAsync(o, a, ct))));
+        g.MapPut("/pendientes-ayer", (SolicitudPendientes s, HttpContext http, IRepositorioAdministracion r) =>
+            Escribir(http, r, async (o, a, ct) => s.Activo is not { } activo
+                ? Results.BadRequest(new MensajeError("Indica si se activa o se desactiva."))
+                : Respuesta(await r.GuardarPendientesAyerAsync(o, a, s.CuentaId, activo, ct), _ => Results.NoContent())))
+            .AddEndpointFilter(EndpointsAcceso.ValidarCsrf);
 
         g.MapPost("/confirmar", async (SolicitudConfirmacion s, HttpContext http, IRepositorioAdministracion r, IValidadorTokenGoogle validador, IOptions<OpcionesAcceso> opciones) =>
         {

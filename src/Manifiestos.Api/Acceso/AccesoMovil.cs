@@ -49,6 +49,13 @@ public sealed class RepositorioAccesoMovil(NpgsqlDataSource datos)
         cmd.Parameters.AddWithValue(fecha);
         return await cmd.ExecuteScalarAsync(ct) as string;
     }
+    /// <summary>Lo planeado ayer para la persona de la sesión que no se completó (decisión 0045). Null = sin contexto vigente.</summary>
+    public async Task<string?> PendientesDeAyerAsync(Guid org, Guid acceso, Guid instalacion, DateOnly fecha, CancellationToken ct)
+    {
+        await using var cmd = datos.CreateCommand("SELECT seguridad.pendientes_de_ayer($1,$2,$3,$4)::text");
+        cmd.Parameters.AddWithValue(org); cmd.Parameters.AddWithValue(acceso); cmd.Parameters.AddWithValue(instalacion); cmd.Parameters.AddWithValue(fecha);
+        return await cmd.ExecuteScalarAsync(ct) as string;
+    }
     /// <summary>Estado de «Terminar parada» enviado por el teléfono ({"paradas":[{jornadaId,paradaId,terminada}]}); solo registra cambios. Migración 0056.</summary>
     public async Task<string> RegistrarParadasTerminadasAsync(Guid org, Guid acceso, Guid instalacion, string json, CancellationToken ct)
     {
@@ -241,6 +248,19 @@ public static class AccesoMovil
             catch (PostgresException e) when (e.SqlState=="22023") { return Results.BadRequest(new MensajeError("Solo se descarga el trabajo de hoy.")); }
             if (json is null) return Rechazo();
             // Huella para que el teléfono compare versiones sin reinterpretar el contenido.
+            var huella="\""+Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(json)))+"\"";
+            http.Response.Headers.ETag=huella;
+            if (http.Request.Headers.IfNoneMatch==huella) return Results.StatusCode(StatusCodes.Status304NotModified);
+            return Results.Text(json,"application/json",Encoding.UTF8);
+        }).RequireAuthorization(Politica);
+        // Pendientes de ayer: aparte del trabajo de hoy para no cambiar lo que ya lee la app instalada. «fecha» es HOY.
+        t.MapGet("/pendientes", async (string? fecha,HttpContext http,RepositorioAccesoMovil repo,IOptions<OpcionesAcceso> opciones) => {
+            if (!DateOnly.TryParseExact(fecha,"yyyy-MM-dd",out var f)) return Results.BadRequest(new MensajeError("Indica la fecha como AAAA-MM-DD."));
+            var c=(ContextoOperador)http.Items[ItemContexto]!;
+            string? json;
+            try { json=await repo.PendientesDeAyerAsync(opciones.Value.OrganizacionId,c.AccesoId,c.InstalacionId,f,http.RequestAborted); }
+            catch (PostgresException e) when (e.SqlState=="22023") { return Results.BadRequest(new MensajeError("Solo se descargan los pendientes del día de hoy.")); }
+            if (json is null) return Rechazo();
             var huella="\""+Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(json)))+"\"";
             http.Response.Headers.ETag=huella;
             if (http.Request.Headers.IfNoneMatch==huella) return Results.StatusCode(StatusCodes.Status304NotModified);
