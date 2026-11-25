@@ -1,0 +1,12 @@
+[Unit]
+Description=Manifiestos: actualizaciones de seguridad y reinicio nocturno
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/manifiestos/backend/deploy
+# Mismos datos de correo que el respaldo (AVISO_CORREO, SMTP_*).
+EnvironmentFile=-/etc/manifiestos/respaldo.env
+ExecStart=/bin/bash scripts/mantenimiento-nocturno.sh
+TimeoutStartSec=60min

@@ -1,0 +1,15 @@
+[Unit]
+Description=Manifiestos: comprobar que los servicios volvieron tras arrancar
+Wants=network-online.target
+After=network-online.target docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/manifiestos/backend/deploy
+EnvironmentFile=-/etc/manifiestos/respaldo.env
+ExecStart=/bin/bash scripts/verificar-servicios.sh
+TimeoutStartSec=20min
+
+[Install]
+WantedBy=multi-user.target

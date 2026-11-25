@@ -1,0 +1,10 @@
+[Unit]
+Description=Manifiestos: mantenimiento y reinicio de cada noche (hora de México)
+
+[Timer]
+OnCalendar=*-*-* 01:30:00 America/Mexico_City
+# Sin Persistent: si el servidor estaba apagado a esa hora NO se reinicia al volver, a media jornada.
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

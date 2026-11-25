@@ -4,6 +4,7 @@
 #   AVISO_CORREO        destinatario(s), separados por coma (p. ej. soporte@arlocapital.com). Vacío = no envía nada.
 #   SMTP_URL            smtps://smtp.gmail.com:465 (SSL directo) o smtp://smtp-relay.gmail.com:587 (con SMTP_STARTTLS=1)
 #   SMTP_REMITENTE      dirección From (debe ser una cuenta o dominio autorizado en el servidor SMTP)
+#   SMTP_NOMBRE         nombre visible del remitente (por omisión, Manifiestos)
 #   SMTP_USUARIO        usuario SMTP (vacío = sin autenticación, p. ej. relay por IP de Google Workspace)
 #   SMTP_CLAVE_ARCHIVO  archivo (permisos 600) con la contraseña o contraseña de aplicación; nunca en .env
 # El mensaje solo lleva el aviso (sin datos del sistema). Falla en silencio hacia el llamador: un correo caído no debe romper el respaldo.
@@ -12,7 +13,7 @@ asunto="${1:?asunto}"; texto="${2:?texto}"
 [ -n "${AVISO_CORREO:-}" ] && [ -n "${SMTP_URL:-}" ] && [ -n "${SMTP_REMITENTE:-}" ] || exit 0
 mensaje="$(mktemp)"; trap 'rm -f "$mensaje"' EXIT
 {
-  printf 'From: Manifiestos <%s>\r\n' "$SMTP_REMITENTE"
+  printf 'From: %s <%s>\r\n' "${SMTP_NOMBRE:-Manifiestos}" "$SMTP_REMITENTE"
   printf 'To: %s\r\n' "$AVISO_CORREO"
   printf 'Subject: [Manifiestos] %s\r\n' "$asunto"
   printf 'Date: %s\r\n' "$(date -R)"
