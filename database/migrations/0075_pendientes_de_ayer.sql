@@ -142,7 +142,9 @@ BEGIN
                 banos := CASE WHEN hechos_banos > 0 THEN 0 ELSE coalesce((p ->> 'banosAsignados')::integer, 0) END;
                 fosas := greatest(coalesce((p ->> 'fosasPropias')::integer, 0) - hechas_fosas, 0);
                 CONTINUE WHEN banos = 0 AND fosas = 0;
-                p := p || jsonb_build_object('banosAsignados', banos, 'fosasPropias', fosas);
+                -- «Planeados» permite al teléfono agregar lo que se le sumó a la parada después de su última descarga de ayer.
+                p := p || jsonb_build_object('banosAsignados', banos, 'fosasPropias', fosas,
+                    'banosPlaneados', coalesce((p ->> 'banosAsignados')::integer, 0), 'fosasPlaneadas', coalesce((p ->> 'fosasPropias')::integer, 0));
             END IF;
             clientes := '[]'::jsonb;
             FOR k IN SELECT e FROM jsonb_array_elements(p -> 'clientes') e LOOP
@@ -159,7 +161,8 @@ BEGIN
         END LOOP;
         CONTINUE WHEN jsonb_array_length(paradas) = 0;
         veh := negocio.unidad_de_persona_en(o, c.sucursal_id, c.persona_id, clock_timestamp(), j ->> 'servicio');
-        jornadas := jornadas || jsonb_build_array(j || jsonb_build_object('paradas', paradas, 'noSeHara', false,
+        -- Una jornada cancelada ayer es un pendiente como los demás: la app solo descarga jornadas programadas o en curso.
+        jornadas := jornadas || jsonb_build_array(j || jsonb_build_object('paradas', paradas, 'noSeHara', false, 'estado', 'programada',
             'unidad', negocio.unidad_para_trabajo(o, c.sucursal_id, veh, j ->> 'servicio')));
     END LOOP;
     RETURN jsonb_build_object('fecha', ayer, 'jornadas', jornadas);
