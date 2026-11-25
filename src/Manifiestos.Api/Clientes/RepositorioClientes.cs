@@ -70,7 +70,7 @@ public sealed class RepositorioClientes(NpgsqlDataSource datos) : IRepositorioCl
                    coalesce(nullif(btrim(f.nombre_comercial), ''), nullif(btrim(f.nombre_fiscal), ''),
                             nullif(btrim(c.codigo_comercial), ''), 'Cliente sin nombre') AS nombre,
                    f.nombre_fiscal, f.nombre_comercial, f.rfc, f.calle, f.numero_exterior, f.colonia,
-                   f.codigo_postal, f.municipio, f.estado, f.telefono, f.correo, au.numero
+                   f.codigo_postal, f.municipio, f.estado, f.telefono, f.correo, au.numero, f.contacto, f.correo2
             FROM negocio.cliente c
             LEFT JOIN LATERAL (SELECT * FROM negocio.ficha_empresa x
                 WHERE (x.organizacion_id, x.empresa_id) = (c.organizacion_id, c.empresa_id)
@@ -93,7 +93,7 @@ public sealed class RepositorioClientes(NpgsqlDataSource datos) : IRepositorioCl
                     T(4), T(5), T(6), T(7), T(8), T(9), T(10), T(11), T(12), T(13), T(14), T(15),
                     propias, propias.Sum(a => a.Banos ?? 0), propias.Sum(a => a.Fosas ?? 0),
                     // Solo los autorizados tienen direcciones propias; los generales van en sitios normales (pestaña Sitios).
-                    T(15) is null ? [] : sitios.GetValueOrDefault((r.GetGuid(1), r.GetGuid(0))) ?? []));
+                    T(15) is null ? [] : sitios.GetValueOrDefault((r.GetGuid(1), r.GetGuid(0))) ?? [], T(16), T(17)));
             }
         }
         await tx.ConfirmarAsync(ct);
@@ -137,7 +137,7 @@ public sealed class RepositorioClientes(NpgsqlDataSource datos) : IRepositorioCl
             Guid id;
             await using (var cmd = tx.Comando("""
                 SELECT negocio.alta_cliente($1, $2, $3::text, $4::text, $5::text, $6::text, $7::text, $8::text,
-                                            $9::text, $10::text, $11::text, $12::text, $13::text, $14::text)
+                                            $9::text, $10::text, $11::text, $12::text, $13::text, $14::text, $15::text, $16::text)
                 """, [organizacion, sucursal, .. Parametros(d)]))
                 id = (Guid)(await cmd.ExecuteScalarAsync(ct))!;
             if (await SitiosCliente.GuardarAsync(tx, organizacion, sucursal, id, d.Sitios, ct) is {} errorSitios) return errorSitios;
@@ -199,7 +199,7 @@ public sealed class RepositorioClientes(NpgsqlDataSource datos) : IRepositorioCl
             int nueva;
             await using (var cmd = tx.Comando("""
                 SELECT negocio.corregir_cliente($1, $2, $3, $4, $5::text, $6::text, $7::text, $8::text, $9::text, $10::text,
-                                                $11::text, $12::text, $13::text, $14::text, $15::text, $16::text)
+                                                $11::text, $12::text, $13::text, $14::text, $15::text, $16::text, $17::text, $18::text)
                 """, [organizacion, sucursal, cliente, revision, .. Parametros(d)]))
                 nueva = (int)(await cmd.ExecuteScalarAsync(ct))!;
             // Solo los autorizados tienen direcciones propias: la autorización puede venir en esta misma solicitud.
@@ -216,7 +216,7 @@ public sealed class RepositorioClientes(NpgsqlDataSource datos) : IRepositorioCl
     private static object[] Parametros(DatosCliente d) =>
     [
         Nulo(d.NombreFiscal), Nulo(d.NombreComercial), Nulo(d.Rfc), Nulo(d.Calle), Nulo(d.NumeroExterior), Nulo(d.Colonia),
-        Nulo(d.CodigoPostal), Nulo(d.Municipio), Nulo(d.Estado), Nulo(d.Telefono), Nulo(d.Correo), Nulo(d.Autorizacion),
+        Nulo(d.CodigoPostal), Nulo(d.Municipio), Nulo(d.Estado), Nulo(d.Telefono), Nulo(d.Correo), Nulo(d.Autorizacion), Nulo(d.Contacto), Nulo(d.Correo2),
     ];
 
     private static object Nulo(string? valor) => (object?)valor ?? DBNull.Value;

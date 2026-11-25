@@ -26,7 +26,7 @@ public sealed class RepositorioUnidades(NpgsqlDataSource datos) : IRepositorioUn
     public const string MensajeOperadorModificado = "Alguien más cambió el operador de esta unidad. Recarga para ver los cambios.";
     public const string MensajeOperadorInvalido = "El operador elegido no está disponible.";
     public const string MensajeCambioClasificacion = "La unidad tiene rutas con paradas o baños sin descargar. Retira o reasigna las paradas y tira la carga antes de cambiar su clasificación.";
-    public const string MensajeCapacidadClasificacion = "La capacidad no corresponde a la clasificación: sanitarios es de 1 m³; fosas, de 10, 15 o 18 m³.";
+    public const string MensajeCapacidadClasificacion = "La capacidad no corresponde a la clasificación: sanitarios es de 1 o 2.3 m³; fosas, de 10, 15 o 18 m³.";
 
     private const string UltimaFicha = """
         LEFT JOIN LATERAL (SELECT x.* FROM negocio.ficha_vehiculo x
@@ -296,10 +296,10 @@ public sealed class RepositorioUnidades(NpgsqlDataSource datos) : IRepositorioUn
     {
         await using (var cmd = tx.Comando("SELECT EXISTS (SELECT 1 FROM catalogo.capacidad_vehiculo WHERE id = $1)", d.CapacidadId))
             if (!(bool)(await cmd.ExecuteScalarAsync(ct))!) return ResultadoEscritura.Invalida(MensajeCapacidadInvalida);
-        // Sanitarios = capacidad 4 (1 m³); fosas = 1, 2 o 3 (10/15/18 m³); 1 m³ sin clasificar sanitarios no se admite.
-        if (d.Clasificacion == "sanitarios" ? d.CapacidadId != 4
+        // Sanitarios = capacidad 4 (1 m³) o 5 (2.3 m³); fosas = 1, 2 o 3 (10/15/18 m³); las de sanitarios no se admiten sin clasificar.
+        if (d.Clasificacion == "sanitarios" ? d.CapacidadId is not (4 or 5)
             : d.Clasificacion == "fosas" ? d.CapacidadId is not (1 or 2 or 3)
-            : d.CapacidadId == 4)
+            : d.CapacidadId is 4 or 5)
             return ResultadoEscritura.Regla("capacidad_incompatible", MensajeCapacidadClasificacion);
         await using (var cmd = tx.Comando($"""
             SELECT EXISTS (

@@ -25,14 +25,16 @@ public sealed record ClienteResumen(
     string? NombreFiscal, string? NombreComercial, string? Rfc,
     string? Calle, string? NumeroExterior, string? Colonia, string? CodigoPostal, string? Municipio, string? Estado,
     string? Telefono, string? Correo, string? Autorizacion,
-    IReadOnlyList<AsignacionCliente> Asignaciones, int Banos, int? Fosas = null, IReadOnlyList<SitioCliente>? Sitios = null);
+    IReadOnlyList<AsignacionCliente> Asignaciones, int Banos, int? Fosas = null, IReadOnlyList<SitioCliente>? Sitios = null,
+    string? Contacto = null, string? Correo2 = null);
 
 // ---- Solicitudes ----
 
 public sealed record SolicitudNuevoCliente(
     Guid? SucursalId, string? NombreFiscal, string? NombreComercial, string? Rfc,
     string? Calle, string? NumeroExterior, string? Colonia, string? CodigoPostal, string? Municipio, string? Estado,
-    string? Telefono, string? Correo, string? Autorizacion, SolicitudSitioCliente[]? Sitios = null);
+    string? Telefono, string? Correo, string? Autorizacion, SolicitudSitioCliente[]? Sitios = null,
+    string? Contacto = null, string? Correo2 = null);
 
 /// <summary>
 /// Revision = revisión de la ficha que se editó. AutorizacionVista (opcional) = número de autorización
@@ -43,11 +45,11 @@ public sealed record SolicitudNuevoCliente(
 public sealed record SolicitudEditarCliente(
     string? NombreFiscal, string? NombreComercial, string? Rfc,
     string? Calle, string? NumeroExterior, string? Colonia, string? CodigoPostal, string? Municipio, string? Estado,
-    string? Telefono, string? Correo, string? Autorizacion, int? Revision, string? AutorizacionVista = null, SolicitudSitioCliente[]? Sitios = null);
+    string? Telefono, string? Correo, string? Autorizacion, int? Revision, string? AutorizacionVista = null, SolicitudSitioCliente[]? Sitios = null, string? Contacto = null, string? Correo2 = null);
 
 // ---- Datos ya validados (recortados; vacío = null) ----
 
 public sealed record DatosCliente(
     string? NombreFiscal, string? NombreComercial, string? Rfc,
     string? Calle, string? NumeroExterior, string? Colonia, string? CodigoPostal, string? Municipio, string? Estado,
-    string? Telefono, string? Correo, string? Autorizacion, SolicitudSitioCliente[]? Sitios = null);
+    string? Telefono, string? Correo, string? Autorizacion, SolicitudSitioCliente[]? Sitios = null, string? Contacto = null, string? Correo2 = null);

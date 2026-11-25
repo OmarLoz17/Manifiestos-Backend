@@ -16,13 +16,14 @@ public sealed record PermisoCuenta(Guid SucursalId, string Pantalla, string Nive
 /// <summary>Cuenta con acceso al sistema. Tipo: administrador, operaciones (panel) o telefono_operador (app).</summary>
 public sealed record CuentaAdmin(
     Guid Id, string Correo, string Nombre, string Tipo, bool Activo, bool PrimerAcceso, DateTime? UltimoAcceso,
-    string? Equipo, string? Unidad, IReadOnlyList<PermisoCuenta> Permisos, string? TerminosVersion = null, DateTime? TerminosEn = null, bool TerminosVigentes = false);
+    string? Equipo, string? Unidad, IReadOnlyList<PermisoCuenta> Permisos, string? TerminosVersion = null, DateTime? TerminosEn = null, bool TerminosVigentes = false,
+    /** Cuenta del panel que además entra como operador en el teléfono. */ bool TambienOperador = false);
 
 public sealed record Deshabilitado(string Tipo, Guid Id, string Nombre, string? Detalle, DateTime? Desde, string? Por);
 
 public sealed record PantallasSucursal(Guid SucursalId, Dictionary<string, string> Pantallas);
 
-public sealed record SolicitudCuenta(string? Correo, string? Nombre, string? Tipo, List<PantallasSucursal>? Permisos);
+public sealed record SolicitudCuenta(string? Correo, string? Nombre, string? Tipo, List<PantallasSucursal>? Permisos, bool? TambienOperador = null);
 public sealed record SolicitudEstado(bool Activo);
 public sealed record SolicitudConfirmacion(string? Credential);
 
@@ -66,6 +67,11 @@ public sealed class RepositorioAdministracion(NpgsqlDataSource datos) : IReposit
                     JsonSerializer.Deserialize<List<PermisoCuenta>>(r.GetString(9), Json) ?? [],
                     r.IsDBNull(10) ? null : r.GetString(10), r.IsDBNull(11) ? null : r.GetDateTime(11),
                     !r.IsDBNull(10) && r.GetString(10) == Legal.DocumentosLegalesVigentes.Todos.First(d => d.Id == "terminos").Version));
+        var operan = new HashSet<Guid>();
+        await using (var cmd = tx.Comando("SELECT acceso_id FROM seguridad.admin_cuentas_que_operan($1)", org))
+        await using (var r = await cmd.ExecuteReaderAsync(ct))
+            while (await r.ReadAsync(ct)) operan.Add(r.GetGuid(0));
+        lista = lista.Select(c => c with { TambienOperador = operan.Contains(c.Id) }).ToList();
         await tx.ConfirmarAsync(ct);
         return lista;
     }
@@ -89,7 +95,13 @@ public sealed class RepositorioAdministracion(NpgsqlDataSource datos) : IReposit
             var rol = s.Tipo ?? "";
             var permisos = JsonSerializer.Serialize((s.Permisos ?? []).Select(p => new { sucursalId = p.SucursalId, pantallas = p.Pantallas }), Json);
             await using var cmd = tx.Comando("SELECT seguridad.admin_guardar_cuenta($1, $2, $3, $4, $5, $6::jsonb)", org, (object?)cuenta ?? DBNull.Value, s.Correo ?? "", s.Nombre ?? "", rol, permisos);
-            return (Guid)(await cmd.ExecuteScalarAsync(ct))!;
+            var id = (Guid)(await cmd.ExecuteScalarAsync(ct))!;
+            if (s.TambienOperador is { } opera)
+            {
+                await using var marca = tx.Comando("SELECT seguridad.admin_tambien_operador($1, $2, $3)", org, id, opera);
+                await marca.ExecuteNonQueryAsync(ct);
+            }
+            return id;
         }, ct);
 
     public Task<RespuestaAdmin<bool>> EstadoCuentaAsync(Guid org, Guid acceso, Guid cuenta, bool activo, CancellationToken ct) =>
@@ -133,7 +145,7 @@ public sealed class RepositorioAdministracion(NpgsqlDataSource datos) : IReposit
     public async Task<bool> SesionConfirmadaAsync(Guid org, Guid acceso, Guid sesion, CancellationToken ct)
     {
         await using var tx = await TransaccionContexto.AbrirAsync(datos, org, acceso, ct);
-        await using var cmd = tx.Comando("SELECT seguridad.sesion_confirmada($1, $2, 5)", org, sesion);
+        await using var cmd = tx.Comando($"SELECT seguridad.sesion_confirmada($1, $2, {EndpointsAdministracion.MinutosConfirmacion})", org, sesion);
         var ok = (bool)(await cmd.ExecuteScalarAsync(ct))!;
         await tx.ConfirmarAsync(ct);
         return ok;
@@ -226,6 +238,7 @@ public static class EndpointsAdministracion
     public const string MensajeSinPermiso = "Solo un administrador puede hacer esto.";
     public const string MensajeConfirmar = "Confirma tu identidad con Google para continuar.";
     public const string CodigoConfirmar = "confirmar";
+    public const int MinutosConfirmacion = 5;
 
     public static IServiceCollection AgregarAdministracion(this IServiceCollection services) =>
         services.AddSingleton<IRepositorioAdministracion, RepositorioAdministracion>();
@@ -257,6 +270,14 @@ public static class EndpointsAdministracion
     public static void MapearAdministracion(this IEndpointRouteBuilder app)
     {
         var g = app.MapGroup("/api/admin");
+
+        // Para que el panel abra «Confirma que eres tú» en cuanto se pulsa, sin intentar antes la acción.
+        g.MapGet("/confirmacion", async (HttpContext http, IRepositorioAdministracion r) =>
+        {
+            if (!ServiciosAcceso.LeerIds(http.User, out var org, out var acceso) || !Guid.TryParse(http.User.FindFirstValue(ServiciosAcceso.ClaimSesionWeb), out var sesion)) return Results.Unauthorized();
+            http.Response.Headers.CacheControl = "no-store";
+            return Results.Ok(new { vigente = await r.SesionConfirmadaAsync(org, acceso, sesion, http.RequestAborted), minutos = MinutosConfirmacion });
+        });
 
         g.MapGet("/cuentas", (HttpContext http, IRepositorioAdministracion r) => Leer(http, async (o, a, ct) => Results.Ok(await r.CuentasAsync(o, a, ct))));
         g.MapGet("/deshabilitados", (HttpContext http, IRepositorioAdministracion r) => Leer(http, async (o, a, ct) => Results.Ok(await r.DeshabilitadosAsync(o, a, ct))));

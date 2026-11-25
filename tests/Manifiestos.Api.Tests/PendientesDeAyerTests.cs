@@ -406,6 +406,7 @@ public sealed class PendientesDeAyerTests(BaseDatosPrueba bd) : IClassFixture<Ba
         var antes = await DeRutaAsync(fosas.Id);
         Assert.Equal((2, 0), (antes.GetProperty("ordenes").GetInt32(), antes.GetProperty("ordenesHechas").GetInt32()));
         Assert.Equal("Cliente Ayer Ficticio", antes.GetProperty("clientes").GetString());
+        Assert.Equal(yo.Persona, antes.GetProperty("operadorId").GetGuid());   // Monitoreo lo pone dentro de la ruta de esa persona
         var deBanos = await DeRutaAsync(banos.Id);
         Assert.Equal((4, false, "sanitarios"), (deBanos.GetProperty("banos").GetInt32(), deBanos.GetProperty("banosHechos").GetBoolean(), deBanos.GetProperty("servicio").GetString()));
 
@@ -420,5 +421,21 @@ public sealed class PendientesDeAyerTests(BaseDatosPrueba bd) : IClassFixture<Ba
         // Quien tiene la función apagada no aparece.
         await bd.SqlComoDuenoAsync($"INSERT INTO seguridad.pendientes_ayer_ajuste(organizacion_id,acceso_id,revision,activo) VALUES('{Org}','{yo.Acceso}',1,false);");
         Assert.DoesNotContain(JsonDocument.Parse(await panel.GetStringAsync("/api/ordenes/pendientes-ayer")).RootElement.EnumerateArray(), x => x.GetProperty("rutaId").GetGuid() == fosas.Id);
+    }
+
+    [Fact]
+    public async Task Los_banos_pendientes_se_cargan_en_la_unidad_que_el_operador_trae_hoy_y_no_en_la_de_sanitarios_que_no_sale()
+    {
+        var yo = await OperadorAsync();
+        var banos = await RutaAsync(yo.Persona, 0, "programada", Hoy.AddDays(-1), "sanitarios", banos: 4);
+        var deHoy = await RutaAsync(yo.Persona, 1, null, Hoy);   // ruta de fosas que sí sale hoy
+        // La ruta de baños ya solo sale el día de ayer: hoy el operador anda en la unidad de la otra ruta.
+        var bitAyer = 1 << (((int)Hoy.AddDays(-1).DayOfWeek + 6) % 7);
+        await bd.SqlComoDuenoAsync($"INSERT INTO negocio.ruta_version(organizacion_id,sucursal_id,ruta_id,revision,nombre,dias,vehiculo_id) VALUES('{Org}','{Suc}','{banos.Id}',2,'Ruta Ayer Ficticia',{bitAyer},'{banos.Unidad}');");
+
+        var captura = await EnviarAsync(yo, "SERVICIO_SANITARIOS", banos.Jornada, banos.Parada, new { banos = 4, banosAsignados = 4 });
+        Assert.Equal("", await PorRevisarAsync(captura));
+        Assert.Equal(deHoy.Unidad.ToString(), await bd.ConsultarAsync($"SELECT vehiculo_id FROM negocio.succion_parada WHERE captura_id='{captura}'"));
+        Assert.Equal("4", await bd.ConsultarAsync($"SELECT banos FROM negocio.carga_unidad_interna('{Org}','{Suc}','{deHoy.Unidad}')"));
     }
 }

@@ -432,7 +432,7 @@ public sealed class RepositorioRutas(NpgsqlDataSource datos) : IRepositorioRutas
         });
 
     /// <summary>
-    /// Unidad de la sucursal con clasificación y capacidad coherentes (sanitarios = 1 m³; fosas = 10/15/18 m³), operador válido
+    /// Unidad de la sucursal con clasificación y capacidad coherentes (sanitarios = 1 o 2.3 m³; fosas = 10/15/18 m³), operador válido
     /// y sin otra ruta de la misma unidad con los mismos días (se compara la máscara, no las iniciales: martes y miércoles
     /// son ambos «M»). Devuelve el NOMBRE de la ruta (número económico + terciado), con los días sin ambigüedad entre paréntesis
     /// solo si otra ruta de la unidad ya usa ese mismo nombre.
@@ -462,7 +462,7 @@ public sealed class RepositorioRutas(NpgsqlDataSource datos) : IRepositorioRutas
             if (!(bool)(await cmd.ExecuteScalarAsync(ct))!) return (null, ResultadoEscritura.Invalida(MensajeOperadorInvalido));
         }
         if (clasificacion is null) return (null, ResultadoEscritura.Regla("unidad_sin_clasificar", MensajeUnidadSinClasificar));
-        if (clasificacion == "sanitarios" ? capacidad != 4 : capacidad is not (1 or 2 or 3))
+        if (clasificacion == "sanitarios" ? capacidad is not (4 or 5) : capacidad is not (1 or 2 or 3))
             return (null, ResultadoEscritura.Regla("capacidad_incompatible", MensajeCapacidadIncompatible));
         if (string.IsNullOrWhiteSpace(numero)) return (null, ResultadoEscritura.Regla("unidad_sin_numero", "La unidad no tiene número económico."));
 

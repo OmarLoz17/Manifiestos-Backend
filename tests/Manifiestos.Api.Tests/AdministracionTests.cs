@@ -68,11 +68,13 @@ public sealed class AdministracionTests(BaseDatosPrueba bd) : IClassFixture<Base
         var sinConfirmar = await EnviarAsync(admin.Nav, HttpMethod.Post, "/api/admin/cuentas", Cuenta(nueva, "operaciones", ("rutas", "ver")));
         Assert.Equal(HttpStatusCode.Forbidden, sinConfirmar.StatusCode);
         Assert.Contains("confirmar", await sinConfirmar.Content.ReadAsStringAsync());
+        Assert.Contains("\"vigente\":false", await admin.Nav.GetStringAsync("/api/admin/confirmacion"));
 
         Assert.Equal(HttpStatusCode.Forbidden, (await ConfirmarAsync(admin, "otra-persona@example.invalid")).StatusCode);
         Assert.Equal(HttpStatusCode.Forbidden, (await EnviarAsync(admin.Nav, HttpMethod.Post, "/api/admin/cuentas", Cuenta(nueva, "operaciones", ("rutas", "ver")))).StatusCode);
 
         Assert.Equal(HttpStatusCode.NoContent, (await ConfirmarAsync(admin)).StatusCode);
+        Assert.Contains("\"vigente\":true", await admin.Nav.GetStringAsync("/api/admin/confirmacion"));
         Assert.Equal(HttpStatusCode.OK, (await EnviarAsync(admin.Nav, HttpMethod.Post, "/api/admin/cuentas", Cuenta(nueva, "operaciones", ("rutas", "ver")))).StatusCode);
     }
 
@@ -359,5 +361,27 @@ public sealed class AdministracionTests(BaseDatosPrueba bd) : IClassFixture<Base
         // Escribir en la sucursal ajena se rechaza aunque la pantalla sea «Ver y editar».
         var r = await EnviarAsync(nav, HttpMethod.Post, "/api/operadores", new { sucursalId = suc2, nombre = "Intruso", cargo = (string?)null, correo = (string?)null });
         Assert.NotEqual(HttpStatusCode.OK, r.StatusCode); Assert.NotEqual(HttpStatusCode.Created, r.StatusCode);
+    }
+
+    [Fact]
+    public async Task Una_cuenta_de_operaciones_marcada_tambien_entra_al_telefono_y_se_puede_dar_de_alta_como_operador()
+    {
+        var admin = await EntrarAsync("administrador");
+        await ConfirmarAsync(admin);
+        var correo = $"doble-{Guid.NewGuid():N}@example.invalid";
+        object Doble(bool opera) => new { correo, nombre = "Persona Doble", tipo = "operaciones", tambienOperador = opera,
+            permisos = new[] { new { sucursalId = Suc, pantallas = new Dictionary<string, string> { ["rutas"] = "editar", ["operadores"] = "editar" } } } };
+        var id = await IdDe(await EnviarAsync(admin.Nav, HttpMethod.Post, "/api/admin/cuentas", Doble(true)));
+        var cuentas = await admin.Nav.GetFromJsonAsync<System.Text.Json.JsonElement>("/api/admin/cuentas");
+        Assert.True(cuentas.EnumerateArray().Single(c => c.GetProperty("id").GetGuid() == id).GetProperty("tambienOperador").GetBoolean());
+        // Operadores admite ese correo (antes lo rechazaba por ser de panel) y la app lo reconoce como operador.
+        var org = BaseDatosPrueba.Organizacion;
+        await bd.SqlComoDuenoAsync($"SELECT negocio.autorizar_cuenta_operador('{org}','{correo}');");
+        Assert.Equal("operaciones", await bd.ConsultarAsync($"SELECT rol_codigo FROM seguridad.acceso_autorizado WHERE correo_permitido='{correo}'"));
+        Task<string> MotivoMovilAsync() => bd.ConsultarAsync($"SELECT count(*) FROM seguridad.acceso_autorizado x WHERE x.correo_permitido='{correo}' AND (x.rol_codigo='telefono_operador' OR x.tambien_operador)");
+        Assert.Equal("1", await MotivoMovilAsync());
+        Assert.Equal(HttpStatusCode.OK, (await EnviarAsync(admin.Nav, HttpMethod.Put, $"/api/admin/cuentas/{id}", Doble(false))).StatusCode);
+        Assert.Equal("0", await MotivoMovilAsync());
+        await Assert.ThrowsAsync<InvalidOperationException>(() => bd.SqlComoDuenoAsync($"SELECT negocio.autorizar_cuenta_operador('{org}','{correo}');"));
     }
 }

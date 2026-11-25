@@ -49,7 +49,7 @@ public static class EndpointsClientes
         if (!ServiciosAcceso.LeerIds(http.User, out var org, out var acceso)) return Results.Unauthorized();
         if (s.SucursalId is not { } sucursal || sucursal == Guid.Empty) return Error("Falta la sucursal.");
         if (Validar([s.NombreFiscal, s.NombreComercial, s.Rfc, s.Calle, s.NumeroExterior, s.Colonia, s.CodigoPostal,
-                     s.Municipio, s.Estado, s.Telefono, s.Correo, s.Autorizacion], out var datos) is { } error) return error;
+                     s.Municipio, s.Estado, s.Telefono, s.Correo, s.Autorizacion, s.Contacto, s.Correo2], out var datos) is { } error) return error;
         if (ValidarSitios(s.Sitios, out var sitios) is {} problema) return Error(problema);
         var r = await clientes.CrearAsync(org, acceso, sucursal, datos! with { Sitios = sitios }, http.RequestAborted);
         return Responder(r, creada: true, $"/api/clientes/{r.Id}");
@@ -59,7 +59,7 @@ public static class EndpointsClientes
     {
         if (!ServiciosAcceso.LeerIds(http.User, out var org, out var acceso)) return Results.Unauthorized();
         if (Validar([s.NombreFiscal, s.NombreComercial, s.Rfc, s.Calle, s.NumeroExterior, s.Colonia, s.CodigoPostal,
-                     s.Municipio, s.Estado, s.Telefono, s.Correo, s.Autorizacion], out var datos) is { } error) return error;
+                     s.Municipio, s.Estado, s.Telefono, s.Correo, s.Autorizacion, s.Contacto, s.Correo2], out var datos) is { } error) return error;
         // 0 = el listado no tenía ficha para el cliente; el repositorio responde con un mensaje claro.
         if (s.Revision is not >= 0) return Error("Falta la revisión que se editó.");
         if (s.AutorizacionVista?.Trim().Length > LargoMaximoCampo) return Error($"Cada dato del cliente admite hasta {LargoMaximoCampo} caracteres.");
@@ -99,8 +99,8 @@ public static class EndpointsClientes
         var c = campos.Select(x => string.IsNullOrWhiteSpace(x) ? null : x.Trim()).ToArray();
         if (c[0] is null && c[1] is null) return Error(RepositorioClientes.MensajeSinNombre);
         if (c.Any(x => x?.Length > LargoMaximoCampo)) return Error($"Cada dato del cliente admite hasta {LargoMaximoCampo} caracteres.");
-        if (c[10] is { } correo && !CorreoValido(correo)) return Error(MensajeCorreoInvalido);
-        datos = new DatosCliente(c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[8], c[9], c[10], c[11]);
+        if (c[10] is { } correo && !CorreoValido(correo) || c[13] is { } correo2 && !CorreoValido(correo2)) return Error(MensajeCorreoInvalido);
+        datos = new DatosCliente(c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[8], c[9], c[10], c[11], Contacto: c[12], Correo2: c[13]);
         return null;
     }
 

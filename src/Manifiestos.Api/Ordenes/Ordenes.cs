@@ -58,7 +58,7 @@ public sealed record SolicitudPendienteDescartado(Guid? RutaId, Guid? ParadaId, 
 
 /// <summary>Una parada que quedó pendiente de ayer (decisión 0045): lo que faltaba al empezar hoy, lo hecho hoy y si Operaciones la quitó.</summary>
 public sealed record PendienteDeAyer(Guid RutaId, string Ruta, string Operador, string? Unidad, Guid ParadaId, string? Sitio, string Clientes, string Servicio,
-    int Banos, bool BanosHechos, int Ordenes, int OrdenesHechas, bool NoSeHara);
+    int Banos, bool BanosHechos, int Ordenes, int OrdenesHechas, bool NoSeHara, /** Quien lo tiene: Monitoreo lo muestra dentro de su ruta de hoy. */ Guid OperadorId);
 
 /// <summary>Cambio de unidad y/o de operador de la ruta solo para ese día (extraordinario). PersonaId vacío = el operador asignado a esa unidad.</summary>
 public sealed record SolicitudCambioUnidad(Guid? RutaId, string? Fecha, Guid? VehiculoId, Guid? PersonaId);
@@ -472,11 +472,11 @@ public sealed class RepositorioOrdenes(NpgsqlDataSource datos) : IRepositorioOrd
     {
         await using var tx = await TransaccionContexto.AbrirAsync(datos, organizacion, acceso, ct);
         var lista = new List<PendienteDeAyer>();
-        await using (var cmd = tx.Comando("SELECT ruta_id, ruta, operador, unidad, parada_id, sitio, clientes, servicio, banos, banos_hechos, ordenes, ordenes_hechas, no_se_hara FROM seguridad.pendientes_ayer_panel($1, $2)", organizacion, hoy))
+        await using (var cmd = tx.Comando("SELECT ruta_id, ruta, operador, unidad, parada_id, sitio, clientes, servicio, banos, banos_hechos, ordenes, ordenes_hechas, no_se_hara, persona_id FROM seguridad.pendientes_ayer_panel($1, $2)", organizacion, hoy))
         await using (var r = await cmd.ExecuteReaderAsync(ct))
             while (await r.ReadAsync(ct))
                 lista.Add(new PendienteDeAyer(r.GetGuid(0), r.GetString(1), r.GetString(2), r.IsDBNull(3) ? null : r.GetString(3), r.GetGuid(4),
-                    r.IsDBNull(5) ? null : r.GetString(5), r.GetString(6), r.GetString(7), r.GetInt32(8), r.GetBoolean(9), r.GetInt32(10), r.GetInt32(11), r.GetBoolean(12)));
+                    r.IsDBNull(5) ? null : r.GetString(5), r.GetString(6), r.GetString(7), r.GetInt32(8), r.GetBoolean(9), r.GetInt32(10), r.GetInt32(11), r.GetBoolean(12), r.GetGuid(13)));
         await tx.ConfirmarAsync(ct);
         return lista;
     }

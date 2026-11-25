@@ -91,7 +91,7 @@ public sealed class UnidadesTests : IClassFixture<BaseDatosPrueba>, IAsyncLifeti
 
         var lista = await ListarAsync(nav);
         // 1 m³ es la capacidad de las unidades de sanitarios (id 4); 10, 15 y 18 m³ son de fosas.
-        Assert.Equal([1m, 10m, 15m, 18m], lista.Capacidades.Select(c => c.ValorM3));
+        Assert.Equal([1m, 2.3m, 10m, 15m, 18m], lista.Capacidades.Select(c => c.ValorM3));
         var u = await UnidadAsync(nav, creada.Id);
         Assert.Equal(numero, u.NumeroEconomico);
         Assert.Equal(18m, u.CapacidadM3);
