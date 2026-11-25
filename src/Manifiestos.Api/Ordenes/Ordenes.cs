@@ -56,6 +56,10 @@ public sealed record SolicitudNoSeHara(Guid? RutaId, string? Fecha, Guid? Parada
 /// <summary>«No se hará» sobre una parada que quedó pendiente de AYER (decisión 0045): se le quita hoy al operador; false lo devuelve.</summary>
 public sealed record SolicitudPendienteDescartado(Guid? RutaId, Guid? ParadaId, bool? NoSeHara);
 
+/// <summary>Una parada que quedó pendiente de ayer (decisión 0045): lo que faltaba al empezar hoy, lo hecho hoy y si Operaciones la quitó.</summary>
+public sealed record PendienteDeAyer(Guid RutaId, string Ruta, string Operador, string? Unidad, Guid ParadaId, string? Sitio, string Clientes, string Servicio,
+    int Banos, bool BanosHechos, int Ordenes, int OrdenesHechas, bool NoSeHara);
+
 /// <summary>Cambio de unidad y/o de operador de la ruta solo para ese día (extraordinario). PersonaId vacío = el operador asignado a esa unidad.</summary>
 public sealed record SolicitudCambioUnidad(Guid? RutaId, string? Fecha, Guid? VehiculoId, Guid? PersonaId);
 
@@ -75,6 +79,7 @@ public interface IRepositorioOrdenes
     Task<ResultadoEscritura> CambiarUnidadAsync(Guid organizacion, Guid acceso, Guid ruta, DateOnly fecha, Guid vehiculo, Guid? persona, CancellationToken ct);
     Task<ResultadoEscritura> MarcarNoSeHaraAsync(Guid organizacion, Guid acceso, Guid ruta, DateOnly fecha, Guid? parada, bool activo, CancellationToken ct);
     Task<ResultadoEscritura> DescartarPendienteAsync(Guid organizacion, Guid acceso, Guid ruta, DateOnly ayer, Guid parada, bool activo, CancellationToken ct);
+    Task<IReadOnlyList<PendienteDeAyer>> PendientesDeAyerAsync(Guid organizacion, Guid acceso, DateOnly hoy, CancellationToken ct);
     Task<ResultadoEscritura> AjustarBanosAsync(Guid organizacion, Guid acceso, Guid ruta, DateOnly fecha, Guid parada, Guid cliente, int banos, CancellationToken ct);
     Task<ResultadoEscritura> AjustarFosasAsync(Guid organizacion, Guid acceso, Guid ruta, DateOnly fecha, Guid parada, Guid cliente, int fosas, CancellationToken ct);
 }
@@ -463,6 +468,19 @@ public sealed class RepositorioOrdenes(NpgsqlDataSource datos) : IRepositorioOrd
     }
 
     /// <summary>Cambia los baños de un cliente en una parada del plan SOLO para esa fecha (historial; el plan fijo no se toca).</summary>
+    public async Task<IReadOnlyList<PendienteDeAyer>> PendientesDeAyerAsync(Guid organizacion, Guid acceso, DateOnly hoy, CancellationToken ct)
+    {
+        await using var tx = await TransaccionContexto.AbrirAsync(datos, organizacion, acceso, ct);
+        var lista = new List<PendienteDeAyer>();
+        await using (var cmd = tx.Comando("SELECT ruta_id, ruta, operador, unidad, parada_id, sitio, clientes, servicio, banos, banos_hechos, ordenes, ordenes_hechas, no_se_hara FROM seguridad.pendientes_ayer_panel($1, $2)", organizacion, hoy))
+        await using (var r = await cmd.ExecuteReaderAsync(ct))
+            while (await r.ReadAsync(ct))
+                lista.Add(new PendienteDeAyer(r.GetGuid(0), r.GetString(1), r.GetString(2), r.IsDBNull(3) ? null : r.GetString(3), r.GetGuid(4),
+                    r.IsDBNull(5) ? null : r.GetString(5), r.GetString(6), r.GetString(7), r.GetInt32(8), r.GetBoolean(9), r.GetInt32(10), r.GetInt32(11), r.GetBoolean(12)));
+        await tx.ConfirmarAsync(ct);
+        return lista;
+    }
+
     public async Task<ResultadoEscritura> DescartarPendienteAsync(Guid organizacion, Guid acceso, Guid ruta, DateOnly ayer, Guid parada, bool activo, CancellationToken ct)
     {
         await using var tx = await TransaccionContexto.AbrirAsync(datos, organizacion, acceso, ct);
@@ -792,6 +810,14 @@ public static class EndpointsOrdenes
                 return Results.NoContent();
             }
         }).AddEndpointFilter(EndpointsAcceso.ValidarCsrf);
+
+        // Pendientes de ayer de todos los operadores (decisión 0045): para Monitoreo.
+        app.MapGet("/api/ordenes/pendientes-ayer", async (HttpContext http, IRepositorioOrdenes ordenes) =>
+        {
+            if (!ServiciosAcceso.LeerIds(http.User, out var org, out var acceso)) return Results.Unauthorized();
+            http.Response.Headers.CacheControl = "no-store";
+            return Results.Ok(await ordenes.PendientesDeAyerAsync(org, acceso, Avisos.AvisosTrabajo.HoyLocal(), http.RequestAborted));
+        });
 
         // «No se hará» sobre un pendiente de ayer (decisión 0045).
         app.MapPut("/api/ordenes/pendientes-ayer/no-se-hara", async (SolicitudPendienteDescartado s, HttpContext http, IRepositorioOrdenes ordenes, Avisos.AvisosTrabajo avisos) =>

@@ -80,9 +80,22 @@ ALTER TABLE negocio.pendiente_descartado ENABLE ROW LEVEL SECURITY;
 CREATE POLICY contexto ON negocio.pendiente_descartado TO manifiestos_app USING (seguridad.puede(organizacion_id, sucursal_id, 'datos.leer')) WITH CHECK (seguridad.puede(organizacion_id, sucursal_id, 'datos.escribir'));
 GRANT SELECT, INSERT ON negocio.pendiente_descartado TO manifiestos_app;
 
+-- Datos de una unidad como los entrega el trabajo del operador (con su carga en sanitarios).
+CREATE FUNCTION negocio.unidad_para_trabajo(o uuid, s uuid, p_vehiculo uuid, p_servicio text) RETURNS jsonb
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog AS $$
+    SELECT jsonb_build_object('id', v.id, 'numeroEconomico', coalesce(fv.numero_economico, v.numero_economico), 'capacidadM3', cap.valor_m3, 'clasificacion', fv.clasificacion)
+        || CASE WHEN p_servicio = 'sanitarios' THEN (SELECT jsonb_build_object('carga', jsonb_build_object('banos', g.banos, 'm3', g.m3, 'capacidadM3', cap.valor_m3, 'porcentaje', g.porcentaje))
+                    FROM negocio.carga_unidad_interna(o, s, v.id) g) ELSE '{}'::jsonb END
+    FROM negocio.vehiculo v
+    LEFT JOIN LATERAL (SELECT x.* FROM negocio.ficha_vehiculo x WHERE (x.organizacion_id, x.sucursal_id, x.vehiculo_id) = (o, s, v.id) ORDER BY x.revision DESC LIMIT 1) fv ON true
+    LEFT JOIN catalogo.capacidad_vehiculo cap ON cap.id = fv.capacidad_id
+    WHERE (v.organizacion_id, v.sucursal_id, v.id) = (o, s, p_vehiculo)
+$$;
+REVOKE ALL ON FUNCTION negocio.unidad_para_trabajo(uuid, uuid, uuid, text) FROM PUBLIC;
+
 CREATE FUNCTION seguridad.pendientes_de_ayer(o uuid, a uuid, i uuid, f date) RETURNS jsonb
 LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = pg_catalog AS $$
-DECLARE c record; ayer date; corte timestamptz; plan jsonb; j jsonb; p jsonb; k jsonb; ordenes jsonb; clientes jsonb; paradas jsonb; jornadas jsonb := '[]'::jsonb; jid uuid; hechos_banos integer; hechas_fosas integer; banos integer; fosas integer; veh uuid; unidad jsonb; carga record;
+DECLARE c record; ayer date; corte timestamptz; plan jsonb; j jsonb; p jsonb; k jsonb; ordenes jsonb; clientes jsonb; paradas jsonb; jornadas jsonb := '[]'::jsonb; jid uuid; hechos_banos integer; hechas_fosas integer; banos integer; fosas integer; veh uuid;
 BEGIN
     IF f IS NULL OR f < ((now() AT TIME ZONE 'UTC')::date - 1) OR f > ((now() AT TIME ZONE 'UTC')::date + 1) THEN
         RAISE EXCEPTION 'Fecha fuera del rango permitido' USING ERRCODE = '22023';
@@ -96,14 +109,6 @@ BEGIN
     -- Lo que se haga hoy se cuenta en la unidad que la persona opera HOY; sin unidad no se muestran (no habría dónde contar la carga).
     veh := negocio.unidad_de_persona_en(o, c.sucursal_id, c.persona_id, clock_timestamp());
     IF veh IS NULL THEN RETURN jsonb_build_object('fecha', ayer, 'jornadas', '[]'::jsonb); END IF;
-    SELECT jsonb_build_object('id', v.id, 'numeroEconomico', coalesce(fv.numero_economico, v.numero_economico), 'capacidadM3', cap.valor_m3, 'clasificacion', fv.clasificacion)
-    INTO unidad
-    FROM negocio.vehiculo v
-    LEFT JOIN LATERAL (SELECT x.* FROM negocio.ficha_vehiculo x WHERE (x.organizacion_id, x.sucursal_id, x.vehiculo_id) = (o, c.sucursal_id, v.id) ORDER BY x.revision DESC LIMIT 1) fv ON true
-    LEFT JOIN catalogo.capacidad_vehiculo cap ON cap.id = fv.capacidad_id
-    WHERE (v.organizacion_id, v.sucursal_id, v.id) = (o, c.sucursal_id, veh);
-    SELECT g.* INTO carga FROM negocio.carga_unidad_interna(o, c.sucursal_id, veh) g;
-
     -- Si nadie abrió la app ayer, la jornada de las rutas que salían ayer puede no existir (misma regla que asegurar_jornadas_del_dia).
     WITH nuevas AS (
         INSERT INTO negocio.jornada (organizacion_id, sucursal_id, id, ruta_id, fecha)
@@ -153,9 +158,9 @@ BEGIN
             paradas := paradas || jsonb_build_array(p || jsonb_build_object('clientes', clientes, 'noSeHara', false));
         END LOOP;
         CONTINUE WHEN jsonb_array_length(paradas) = 0;
+        veh := negocio.unidad_de_persona_en(o, c.sucursal_id, c.persona_id, clock_timestamp(), j ->> 'servicio');
         jornadas := jornadas || jsonb_build_array(j || jsonb_build_object('paradas', paradas, 'noSeHara', false,
-            'unidad', unidad || CASE WHEN j ->> 'servicio' = 'sanitarios' THEN jsonb_build_object('carga',
-                jsonb_build_object('banos', carga.banos, 'm3', carga.m3, 'capacidadM3', unidad -> 'capacidadM3', 'porcentaje', carga.porcentaje)) ELSE '{}'::jsonb END));
+            'unidad', negocio.unidad_para_trabajo(o, c.sucursal_id, veh, j ->> 'servicio')));
     END LOOP;
     RETURN jsonb_build_object('fecha', ayer, 'jornadas', jornadas);
 END $$;
@@ -166,12 +171,13 @@ GRANT EXECUTE ON FUNCTION seguridad.pendientes_de_ayer(uuid, uuid, uuid, date) T
 -- en ese momento (no con la de la ruta de ayer). La resolución del mismo día no cambia: la anterior se conserva renombrada y se usa en lo demás.
 
 -- Unidad que la persona opera a un instante: la que le dio un cambio del día, si no la de una ruta que sale ese día, si no su asignación.
-CREATE FUNCTION negocio.unidad_de_persona_en(o uuid, s uuid, p_persona uuid, p_instante timestamptz) RETURNS uuid
+CREATE FUNCTION negocio.unidad_de_persona_en(o uuid, s uuid, p_persona uuid, p_instante timestamptz, p_servicio text DEFAULT NULL) RETURNS uuid
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog AS $$
     WITH dia AS (SELECT (p_instante AT TIME ZONE 'America/Monterrey')::date AS d)
     SELECT v.id FROM negocio.vehiculo v, dia
     WHERE v.organizacion_id = o AND v.sucursal_id = s AND negocio.persona_opera_unidad(o, s, v.id, p_persona, p_instante)
-    ORDER BY EXISTS (SELECT 1 FROM negocio.cambio_unidad_dia c WHERE (c.organizacion_id, c.sucursal_id, c.vehiculo_id, c.fecha) = (o, s, v.id, dia.d)) DESC,
+    ORDER BY coalesce((SELECT x.clasificacion FROM negocio.ficha_vehiculo x WHERE (x.organizacion_id, x.sucursal_id, x.vehiculo_id) = (o, s, v.id) ORDER BY x.revision DESC LIMIT 1) = p_servicio, false) DESC,
+             EXISTS (SELECT 1 FROM negocio.cambio_unidad_dia c WHERE (c.organizacion_id, c.sucursal_id, c.vehiculo_id, c.fecha) = (o, s, v.id, dia.d)) DESC,
              EXISTS (SELECT 1 FROM negocio.ruta r
                      JOIN LATERAL (SELECT x.vehiculo_id, x.dias FROM negocio.ruta_version x
                          WHERE (x.organizacion_id, x.sucursal_id, x.ruta_id) = (r.organizacion_id, r.sucursal_id, r.id) ORDER BY x.revision DESC LIMIT 1) rv ON true
@@ -180,13 +186,13 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog AS $$
              v.id
     LIMIT 1
 $$;
-REVOKE ALL ON FUNCTION negocio.unidad_de_persona_en(uuid, uuid, uuid, timestamptz) FROM PUBLIC;
+REVOKE ALL ON FUNCTION negocio.unidad_de_persona_en(uuid, uuid, uuid, timestamptz, text) FROM PUBLIC;
 
 -- Si la jornada es del día anterior al instante «ancla» (la primera captura de servicio de esa orden o parada; si no hay, la actual)
 -- y la persona tenía esa ruta ayer, devuelve la unidad en que se cuenta lo hecho. NULL = no es un pendiente.
 CREATE FUNCTION negocio.unidad_para_pendiente(o uuid, s uuid, p_persona uuid, p_jornada uuid, p_objetivo uuid, p_instante timestamptz) RETURNS uuid
 LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = pg_catalog AS $$
-DECLARE j record; ancla timestamptz; corte timestamptz; veh_ayer uuid; persona_ayer uuid;
+DECLARE j record; ancla timestamptz; corte timestamptz; veh_ayer uuid; persona_ayer uuid; servicio text;
 BEGIN
     SELECT x.ruta_id, x.fecha INTO j FROM negocio.jornada x WHERE (x.organizacion_id, x.sucursal_id, x.id) = (o, s, p_jornada);
     IF NOT FOUND THEN RETURN NULL; END IF;
@@ -203,7 +209,9 @@ BEGIN
     WHERE (v.organizacion_id, v.sucursal_id, v.ruta_id) = (o, s, j.ruta_id) AND v.registrada_en < corte
     ORDER BY v.revision DESC LIMIT 1;
     IF veh_ayer IS NULL OR coalesce(persona_ayer, negocio.persona_de_unidad_en(o, s, veh_ayer, corte)) IS DISTINCT FROM p_persona THEN RETURN NULL; END IF;
-    RETURN negocio.unidad_de_persona_en(o, s, p_persona, ancla);
+    -- La captura de sanitarios y la orden de fosa llevan su propio servicio.
+    servicio := CASE WHEN EXISTS (SELECT 1 FROM negocio.parada x WHERE (x.organizacion_id, x.sucursal_id, x.id) = (o, s, p_objetivo)) THEN 'sanitarios' ELSE 'fosas' END;
+    RETURN negocio.unidad_de_persona_en(o, s, p_persona, ancla, servicio);
 END $$;
 REVOKE ALL ON FUNCTION negocio.unidad_para_pendiente(uuid, uuid, uuid, uuid, uuid, timestamptz) FROM PUBLIC;
 

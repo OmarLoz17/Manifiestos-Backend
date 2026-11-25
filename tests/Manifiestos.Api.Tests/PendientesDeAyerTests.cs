@@ -386,4 +386,39 @@ public sealed class PendientesDeAyerTests(BaseDatosPrueba bd) : IClassFixture<Ba
         finally { await GuardarAsync(null, true); }
         Assert.Equal((true, true, true), await LeerAsync());
     }
+
+    [Fact]
+    public async Task Monitoreo_lista_lo_pendiente_y_lo_hecho_hoy_y_la_carga_de_fosas_es_de_la_unidad_de_hoy()
+    {
+        var yo = await OperadorAsync(); var otro = await OperadorAsync();
+        var fosas = await RutaAsync(yo.Persona, 2, "programada", Hoy.AddDays(-1));
+        var banos = await RutaAsync(yo.Persona, 0, "programada", Hoy.AddDays(-1), "sanitarios", banos: 4);
+        var orden = Ordenes((await PendientesAsync(yo)).Single(j => j.GetProperty("jornadaId").GetGuid() == fosas.Jornada))[0].GetProperty("ordenId").GetGuid();
+        var nueva = await CambiarDeUnidadHoyAsync(yo, otro, fosas, "fosas");
+
+        var correo = $"ops-{Guid.NewGuid():N}@example.invalid";
+        await bd.AutorizarAsync(correo, "operaciones", escribir: true);
+        var panel = _api.NuevoNavegador();
+        Assert.Equal(System.Net.HttpStatusCode.NoContent, (await panel.EntrarAsync(ValidadorFicticio.Token($"s-{correo}", correo))).StatusCode);
+        async Task<JsonElement> DeRutaAsync(Guid ruta) =>
+            JsonDocument.Parse(await panel.GetStringAsync("/api/ordenes/pendientes-ayer")).RootElement.EnumerateArray().Single(x => x.GetProperty("rutaId").GetGuid() == ruta).Clone();
+
+        var antes = await DeRutaAsync(fosas.Id);
+        Assert.Equal((2, 0), (antes.GetProperty("ordenes").GetInt32(), antes.GetProperty("ordenesHechas").GetInt32()));
+        Assert.Equal("Cliente Ayer Ficticio", antes.GetProperty("clientes").GetString());
+        var deBanos = await DeRutaAsync(banos.Id);
+        Assert.Equal((4, false, "sanitarios"), (deBanos.GetProperty("banos").GetInt32(), deBanos.GetProperty("banosHechos").GetBoolean(), deBanos.GetProperty("servicio").GetString()));
+
+        await EnviarAsync(yo, "SERVICIO_OPERADOR", fosas.Jornada, orden);
+        var despues = await DeRutaAsync(fosas.Id);
+        Assert.Equal((2, 1), (despues.GetProperty("ordenes").GetInt32(), despues.GetProperty("ordenesHechas").GetInt32()));
+        // La orden succionada hoy se carga en la unidad de HOY, no en la de la ruta de ayer.
+        Task<string> PorTirarAsync(Guid unidad) => bd.ConsultarAsync($"SELECT ordenes FROM (SELECT * FROM negocio.carga_fosas_interna('{Org}','{Suc}','{unidad}')) c(ordenes,m3,cap,pct,ultima,desglose)");
+        Assert.Equal("1", await PorTirarAsync(nueva));
+        Assert.Equal("0", await PorTirarAsync(fosas.Unidad));
+
+        // Quien tiene la función apagada no aparece.
+        await bd.SqlComoDuenoAsync($"INSERT INTO seguridad.pendientes_ayer_ajuste(organizacion_id,acceso_id,revision,activo) VALUES('{Org}','{yo.Acceso}',1,false);");
+        Assert.DoesNotContain(JsonDocument.Parse(await panel.GetStringAsync("/api/ordenes/pendientes-ayer")).RootElement.EnumerateArray(), x => x.GetProperty("rutaId").GetGuid() == fosas.Id);
+    }
 }
