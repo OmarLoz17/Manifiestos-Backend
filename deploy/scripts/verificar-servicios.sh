@@ -33,7 +33,10 @@ while true; do
   sleep "$pausa"
 done
 
-unidades="$(systemctl --failed --no-legend --plain 2>/dev/null | awk '{print $1}' | grep -v '^manifiestos-verificar' | tr '\n' ' ')"
+# Unidades que no afectan a la aplicación y no deben dar alarma. cloud-init-hotplugd es de la preparación de la máquina virtual
+# (detecta hardware conectado en caliente) y queda en error en el VPS sin efecto en los servicios.
+ignoradas="manifiestos-verificar.service ${UNIDADES_IGNORADAS:-cloud-init-hotplugd.service}"
+unidades="$(systemctl --failed --no-legend --plain 2>/dev/null | awk '{print $1}' | grep -vxF -f <(tr ' ' '\n' <<< "$ignoradas" | grep .) | tr '\n' ' ')"
 [ -n "${unidades// /}" ] && fallos+=("unidades del sistema con error: $unidades")
 uso="$(df --output=pcent / 2>/dev/null | tail -n 1 | tr -dc '0-9')"
 [ -n "$uso" ] && [ "$uso" -ge "${DISCO_MAXIMO:-85}" ] && fallos+=("el disco está al $uso %")
