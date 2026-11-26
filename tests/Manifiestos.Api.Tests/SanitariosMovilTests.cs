@@ -376,6 +376,9 @@ public sealed partial class SanitariosMovilTests(BaseDatosPrueba bd) : IClassFix
         Assert.Equal(JsonValueKind.String, atendida.GetProperty("capturadaEn").ValueKind);
         // Lo asignado que cubrió la captura viaja con la atención: el panel lo compara con lo asignado hoy para saber si se agregaron baños después.
         Assert.True(atendida.GetProperty("banosCubiertos").GetInt32() > 0);
+        // Cada captura lleva dónde se tomó su foto (punto del mapa de Monitoreo).
+        var captura = Assert.Single(atendida.GetProperty("capturas").EnumerateArray());
+        Assert.Equal((25.6702m, -100.3091m), (captura.GetProperty("latitud").GetDecimal(), captura.GetProperty("longitud").GetDecimal()));
         // Tirada en la planta: la parada pasa a tirada.
         Assert.Equal(HttpStatusCode.OK, (await EnviarAsync(s.Http, Succion(s, e, c2, e.ParadaC, e.Jornada2, 40, 8, fecha: Ahora(-60)))).StatusCode);
         Assert.Equal(HttpStatusCode.OK, (await EnviarAsync(s.Http, Tirada(s, e, capTirada, tirada, [c1, c2]))).StatusCode);
