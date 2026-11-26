@@ -25,14 +25,15 @@ public sealed record ClienteDeOrden(Guid ClienteId, string Nombre, bool Autoriza
 public sealed record FirmaDeOrden(Guid ArchivoId, DateTimeOffset En);
 public sealed record OrdenDeCliente(Guid? Id, int Numero, bool Transportista, bool Cliente, bool AguaYDrenaje, DateTimeOffset? ServicioEn = null, Guid? FotoId = null,
     FirmaDeOrden? FirmaTransportista = null, FirmaDeOrden? FirmaCliente = null, FirmaDeOrden? FirmaPlanta = null,
-    /** Dónde se tomó la foto del servicio de una fosa fija (punto del mapa de Monitoreo); las demás van en CapturaSanitarios. */ decimal? FotoLatitud = null, decimal? FotoLongitud = null);
+    /** Dónde se tomó la foto del servicio de una fosa fija (punto del mapa de Monitoreo); las demás van en CapturaSanitarios. */ decimal? FotoLatitud = null, decimal? FotoLongitud = null,
+    /** Precisión (m) que reportó el teléfono para esa ubicación. */ decimal? FotoPrecision = null);
 /// <summary>
 /// Atención de una parada de SANITARIOS en el día pedido (se calcula de las capturas): baños succionados, cuándo se capturó la primera
 /// succión y si ya se tiraron en la planta (la captura entró en una tirada). Null = sin captura todavía.
 /// </summary>
 /// <param name="BanosCubiertos">Suma de los baños asignados que ya cubrieron las capturas (cada captura guarda lo asignado a su orden): si Operaciones agrega baños después de atender la parada, lo asignado hoy supera lo cubierto y la parada vuelve a tener trabajo pendiente.</param>
 /// <summary>Una captura de la parada (una por orden): su foto, cuándo se tomó, cuántos baños succionó y cuántos asignados cubrió. EsFosa = orden de fosa propia (sin baños).</summary>
-public sealed record CapturaSanitarios(Guid? FotoId, DateTimeOffset CapturadaEn, int BanosSuccionados, int BanosCubiertos, bool EsFosa, bool Tirada = false, decimal? Latitud = null, decimal? Longitud = null);
+public sealed record CapturaSanitarios(Guid? FotoId, DateTimeOffset CapturadaEn, int BanosSuccionados, int BanosCubiertos, bool EsFosa, bool Tirada = false, decimal? Latitud = null, decimal? Longitud = null, decimal? Precision = null);
 public sealed record AtencionSanitarios(int BanosSuccionados, DateTimeOffset CapturadaEn, bool Tirada, Guid? FotoId = null, int? BanosCubiertos = null, IReadOnlyList<CapturaSanitarios>? Capturas = null);
 public sealed record ParadaDeOrden(Guid Id, int Posicion, string? Sitio, string? Direccion, IReadOnlyList<ClienteDeOrden> Clientes,
     decimal? Latitud = null, decimal? Longitud = null, AtencionSanitarios? Atencion = null, bool NoSeHara = false, bool Terminada = false, int NoNecesarias = 0, bool Reportada = false, IReadOnlyList<Guid>? OrdenesNoNecesarias = null);
@@ -197,7 +198,7 @@ public sealed class RepositorioOrdenes(NpgsqlDataSource datos) : IRepositorioOrd
         var servicioEn = new Dictionary<Guid, DateTimeOffset>();
         var fotoDe = new Dictionary<Guid, Guid>();   // archivo de la foto de la captura del servicio más antigua de cada orden
         var firmaDe = new Dictionary<(Guid Orden, string Tipo), FirmaDeOrden>();   // imagen de la firma de cada paso (la más antigua) y su hora
-        var ubicacionDe = new Dictionary<Guid, (decimal Latitud, decimal Longitud)>();   // dónde se tomó esa foto, aunque el archivo no haya llegado
+        var ubicacionDe = new Dictionary<Guid, (decimal Latitud, decimal Longitud, decimal? Precision)>();   // dónde se tomó esa foto, aunque el archivo no haya llegado
         if (fecha is { } dia2 && !rango)
         {
             await using (var cmd = tx.Comando("SELECT id, ruta_id FROM negocio.jornada WHERE organizacion_id = $1 AND fecha = $2::date", organizacion, dia2))
@@ -208,7 +209,8 @@ public sealed class RepositorioOrdenes(NpgsqlDataSource datos) : IRepositorioOrd
                        (SELECT e.archivo_id FROM negocio.evidencia_captura e WHERE (e.organizacion_id, e.sucursal_id, e.captura_id) = (ct.organizacion_id, ct.sucursal_id, ct.captura_id) AND e.rol = 'FOTO' AND e.archivo_id IS NOT NULL LIMIT 1),
                        (SELECT e.archivo_id FROM negocio.evidencia_captura e WHERE (e.organizacion_id, e.sucursal_id, e.captura_id) = (ct.organizacion_id, ct.sucursal_id, ct.captura_id) AND e.rol IN ('FIRMA_OPERADOR', 'FIRMA_CLIENTE', 'FIRMA_RECEPCION') AND e.archivo_id IS NOT NULL LIMIT 1),
                        (SELECT e.latitud FROM negocio.evidencia_captura e WHERE (e.organizacion_id, e.sucursal_id, e.captura_id) = (ct.organizacion_id, ct.sucursal_id, ct.captura_id) AND e.rol = 'FOTO' LIMIT 1),
-                       (SELECT e.longitud FROM negocio.evidencia_captura e WHERE (e.organizacion_id, e.sucursal_id, e.captura_id) = (ct.organizacion_id, ct.sucursal_id, ct.captura_id) AND e.rol = 'FOTO' LIMIT 1)
+                       (SELECT e.longitud FROM negocio.evidencia_captura e WHERE (e.organizacion_id, e.sucursal_id, e.captura_id) = (ct.organizacion_id, ct.sucursal_id, ct.captura_id) AND e.rol = 'FOTO' LIMIT 1),
+                       (SELECT e.precision_metros FROM negocio.evidencia_captura e WHERE (e.organizacion_id, e.sucursal_id, e.captura_id) = (ct.organizacion_id, ct.sucursal_id, ct.captura_id) AND e.rol = 'FOTO' LIMIT 1)
                 FROM negocio.captura_trabajo_efectiva ct JOIN negocio.captura k ON (k.organizacion_id, k.sucursal_id, k.id) = (ct.organizacion_id, ct.sucursal_id, ct.captura_id)
                 JOIN negocio.jornada j ON (j.organizacion_id, j.sucursal_id, j.id) = (ct.organizacion_id, ct.sucursal_id, ct.jornada_id)
                 WHERE ct.organizacion_id = $1 AND j.fecha = $2::date AND ct.tipo IN ('SERVICIO_OPERADOR', 'FIRMA_CLIENTE', 'RECEPCION_PLANTA')
@@ -230,7 +232,7 @@ public sealed class RepositorioOrdenes(NpgsqlDataSource datos) : IRepositorioOrd
                         {
                             servicioEn[r.GetGuid(0)] = en;
                             if (!r.IsDBNull(3)) fotoDe[r.GetGuid(0)] = r.GetGuid(3); else fotoDe.Remove(r.GetGuid(0));
-                            if (!r.IsDBNull(5) && !r.IsDBNull(6)) ubicacionDe[r.GetGuid(0)] = (r.GetDecimal(5), r.GetDecimal(6)); else ubicacionDe.Remove(r.GetGuid(0));
+                            if (!r.IsDBNull(5) && !r.IsDBNull(6)) ubicacionDe[r.GetGuid(0)] = (r.GetDecimal(5), r.GetDecimal(6), r.IsDBNull(7) ? null : r.GetDecimal(7)); else ubicacionDe.Remove(r.GetGuid(0));
                         }
                     }
                 }
@@ -273,7 +275,8 @@ public sealed class RepositorioOrdenes(NpgsqlDataSource datos) : IRepositorioOrd
                        (SELECT e.archivo_id FROM negocio.evidencia_captura e WHERE (e.organizacion_id, e.sucursal_id, e.captura_id) = (sp.organizacion_id, sp.sucursal_id, sp.captura_id) AND e.rol = 'FOTO' AND e.archivo_id IS NOT NULL LIMIT 1),
                        sp.banos_asignados, sp.es_fosa,
                        (SELECT e.latitud FROM negocio.evidencia_captura e WHERE (e.organizacion_id, e.sucursal_id, e.captura_id) = (sp.organizacion_id, sp.sucursal_id, sp.captura_id) AND e.rol = 'FOTO' LIMIT 1),
-                       (SELECT e.longitud FROM negocio.evidencia_captura e WHERE (e.organizacion_id, e.sucursal_id, e.captura_id) = (sp.organizacion_id, sp.sucursal_id, sp.captura_id) AND e.rol = 'FOTO' LIMIT 1)
+                       (SELECT e.longitud FROM negocio.evidencia_captura e WHERE (e.organizacion_id, e.sucursal_id, e.captura_id) = (sp.organizacion_id, sp.sucursal_id, sp.captura_id) AND e.rol = 'FOTO' LIMIT 1),
+                       (SELECT e.precision_metros FROM negocio.evidencia_captura e WHERE (e.organizacion_id, e.sucursal_id, e.captura_id) = (sp.organizacion_id, sp.sucursal_id, sp.captura_id) AND e.rol = 'FOTO' LIMIT 1)
                 FROM negocio.succion_parada sp JOIN negocio.jornada j ON (j.organizacion_id, j.sucursal_id, j.id) = (sp.organizacion_id, sp.sucursal_id, sp.jornada_id)
                 WHERE sp.organizacion_id = $1 AND j.fecha = $2::date
                 """, organizacion, dia3);
@@ -283,7 +286,7 @@ public sealed class RepositorioOrdenes(NpgsqlDataSource datos) : IRepositorioOrd
             {
                 var en = new DateTimeOffset(DateTime.SpecifyKind(r.GetDateTime(2), DateTimeKind.Utc));
                 if (!porParada.TryGetValue(r.GetGuid(0), out var lista)) porParada[r.GetGuid(0)] = lista = [];
-                lista.Add((new CapturaSanitarios(r.IsDBNull(4) ? null : r.GetGuid(4), en, r.GetInt32(1), r.GetInt32(5), !r.IsDBNull(6) && r.GetBoolean(6), r.GetBoolean(3), r.IsDBNull(7) ? null : r.GetDecimal(7), r.IsDBNull(8) ? null : r.GetDecimal(8)), r.GetBoolean(3)));
+                lista.Add((new CapturaSanitarios(r.IsDBNull(4) ? null : r.GetGuid(4), en, r.GetInt32(1), r.GetInt32(5), !r.IsDBNull(6) && r.GetBoolean(6), r.GetBoolean(3), r.IsDBNull(7) ? null : r.GetDecimal(7), r.IsDBNull(8) ? null : r.GetDecimal(8), r.IsDBNull(9) ? null : r.GetDecimal(9)), r.GetBoolean(3)));
             }
             foreach (var (parada, lista) in porParada)
             {
@@ -317,9 +320,9 @@ public sealed class RepositorioOrdenes(NpgsqlDataSource datos) : IRepositorioOrd
                     }
                     var orden = jornada == Guid.Empty ? Guid.Empty : IdOrden(jornada, parada, c.ClienteId, n);
                     var firmaPropia = !c.Autorizado || c.FosaPropia;   // el generador es nuestra empresa: no firma el cliente
-                    (decimal Latitud, decimal Longitud)? lugar = ubicacionDe.TryGetValue(orden, out var u) ? u : null;
+                    (decimal Latitud, decimal Longitud, decimal? Precision)? lugar = ubicacionDe.TryGetValue(orden, out var u) ? u : null;
                     return new OrdenDeCliente(orden == Guid.Empty ? null : orden, n, firmas.Contains((orden, "SERVICIO_OPERADOR")), firmaPropia || firmas.Contains((orden, "FIRMA_CLIENTE")), firmas.Contains((orden, "RECEPCION_PLANTA")), servicioEn.TryGetValue(orden, out var hora) ? hora : null, fotoDe.TryGetValue(orden, out var foto) ? foto : null,
-                        firmaDe.GetValueOrDefault((orden, "SERVICIO_OPERADOR")), firmaDe.GetValueOrDefault((orden, "FIRMA_CLIENTE")), firmaDe.GetValueOrDefault((orden, "RECEPCION_PLANTA")), lugar?.Latitud, lugar?.Longitud);
+                        firmaDe.GetValueOrDefault((orden, "SERVICIO_OPERADOR")), firmaDe.GetValueOrDefault((orden, "FIRMA_CLIENTE")), firmaDe.GetValueOrDefault((orden, "RECEPCION_PLANTA")), lugar?.Latitud, lugar?.Longitud, lugar?.Precision);
                 }).ToList(),
             };
         }

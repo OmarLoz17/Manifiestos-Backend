@@ -361,6 +361,7 @@ public sealed class CapturasMovilTests(BaseDatosPrueba bd) : IClassFixture<BaseD
         var delDia = JsonDocument.Parse(await web.GetStringAsync($"/api/ordenes?fecha={Hoy}")).RootElement.EnumerateArray()
             .Single(r => r.GetProperty("id").GetGuid() == ruta).GetProperty("paradas")[0].GetProperty("clientes")[0].GetProperty("ordenes");
         Assert.Equal((25.6866m, -100.3161m), (delDia[0].GetProperty("fotoLatitud").GetDecimal(), delDia[0].GetProperty("fotoLongitud").GetDecimal()));
+        Assert.Equal(8.5m, delDia[0].GetProperty("fotoPrecision").GetDecimal());
         Assert.Equal(JsonValueKind.Null, delDia[1].GetProperty("fotoLatitud").ValueKind);
         if (autorizado)
         {
