@@ -1,5 +1,6 @@
 using Manifiestos.Api.Datos;
 using Manifiestos.Api.Rutas;
+using Manifiestos.Api.Sitios;
 
 namespace Manifiestos.Api.Clientes;
 
@@ -71,6 +72,13 @@ public static class SitiosCliente
                 await baja.ExecuteNonQueryAsync(ct);
                 continue;
             }
+            var cambioDireccion=actual is null ||
+                (actual.Nombre,actual.Calle,actual.NumeroExterior,actual.Colonia,actual.CodigoPostal,actual.Municipio,actual.Estado,actual.Latitud,actual.Longitud)!=
+                (s.Nombre,s.Calle,s.NumeroExterior,s.Colonia,s.CodigoPostal,s.Municipio,s.Estado,s.Latitud,s.Longitud);
+            var cambioVinculo=actual is null || actual.Banos!=s.Banos || actual.Fosas!=s.Fosas || actual.FosaPropia!=s.FosaPropia;
+            // Dirección nueva o con algún cambio: exige el punto. Una histórica sin coordenadas enviada igual no bloquea (decisión 0048).
+            if ((cambioDireccion || cambioVinculo) && (s.Latitud is null || s.Longitud is null))
+                return ResultadoEscritura.Invalida(EndpointsSitios.MensajeSinUbicacion);
             var id=actual?.SitioId??Guid.NewGuid();
             if (actual is null)
             {
@@ -79,9 +87,6 @@ public static class SitiosCliente
                 await using var punto=tx.Comando("INSERT INTO negocio.punto_servicio (organizacion_id,sucursal_id,sitio_id) VALUES ($1,$2,$3)",org,suc,id);
                 await punto.ExecuteNonQueryAsync(ct);
             }
-            var cambioDireccion=actual is null ||
-                (actual.Nombre,actual.Calle,actual.NumeroExterior,actual.Colonia,actual.CodigoPostal,actual.Municipio,actual.Estado,actual.Latitud,actual.Longitud)!=
-                (s.Nombre,s.Calle,s.NumeroExterior,s.Colonia,s.CodigoPostal,s.Municipio,s.Estado,s.Latitud,s.Longitud);
             if (cambioDireccion)
             {
                 await using var ficha=tx.Comando("""
@@ -94,7 +99,7 @@ public static class SitiosCliente
                     """,org,suc,id,(actual?.RevisionFicha??0)+1,N(s.Nombre),N(s.Calle),N(s.NumeroExterior),N(s.Colonia),N(s.CodigoPostal),N(s.Municipio),N(s.Estado),N(s.Latitud),N(s.Longitud));
                 await ficha.ExecuteNonQueryAsync(ct);
             }
-            if (actual is null || actual.Banos!=s.Banos || actual.Fosas!=s.Fosas || actual.FosaPropia!=s.FosaPropia)
+            if (cambioVinculo)
             {
                 await using var vinculo=tx.Comando("""
                     INSERT INTO negocio.cliente_sitio (organizacion_id,sucursal_id,cliente_id,sitio_id,revision,banos_registrados,fosas_registradas,fosa_propia)

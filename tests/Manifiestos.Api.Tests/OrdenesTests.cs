@@ -44,8 +44,8 @@ public sealed class OrdenesTests : IClassFixture<BaseDatosPrueba>, IAsyncLifetim
         using var nav = await SesionAsync();
         var r = await EnviarAsync(nav, HttpMethod.Post, "/api/clientes", new
         {
-            sucursalId = Suc, nombreComercial = "Cliente Fosa Propia Ficticio", autorizacion = "AMB-FICT-FOSA",
-            sitios = new[] { new { nombre = "Sitio rentado ficticio", municipio = "Municipio ficticio", fosas = 1, fosaPropia = true } },
+            sucursalId = Suc, nombreComercial = "Cliente Fosa Propia Ficticio", autorizacion = "AMB-FICT-FOSA", telefono = "5550000099", correo = "fixture@example.invalid",
+            sitios = new[] { new { nombre = "Sitio rentado ficticio", municipio = "Municipio ficticio", fosas = 1, fosaPropia = true, latitud = 25.6m, longitud = -100.3m } },
         });
         Assert.Equal(HttpStatusCode.Created, r.StatusCode);
         var id = (await r.Content.ReadFromJsonAsync<RevisionGuardada>())!.Id;
@@ -54,7 +54,7 @@ public sealed class OrdenesTests : IClassFixture<BaseDatosPrueba>, IAsyncLifetim
 
         var cambio = await EnviarAsync(nav, HttpMethod.Put, $"/api/clientes/{id}/sitios", new
         {
-            sitios = new[] { new { sitioId = sitio.SitioId, revision = sitio.Revision, revisionFicha = sitio.RevisionFicha, nombre = sitio.Nombre, municipio = sitio.Municipio, fosas = 1, fosaPropia = false } },
+            sitios = new[] { new { sitioId = sitio.SitioId, revision = sitio.Revision, revisionFicha = sitio.RevisionFicha, nombre = sitio.Nombre, municipio = sitio.Municipio, fosas = 1, fosaPropia = false, latitud = 25.6m, longitud = -100.3m } },
         });
         Assert.Equal(HttpStatusCode.NoContent, cambio.StatusCode);
         Assert.Equal("t,f", await _bd.ConsultarAsync($"SELECT string_agg(fosa_propia::text, ',' ORDER BY revision) FROM negocio.cliente_sitio WHERE cliente_id = '{id}'").ContinueWith(t => t.Result.Replace("true", "t").Replace("false", "f")));

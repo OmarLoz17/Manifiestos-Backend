@@ -72,6 +72,34 @@ public sealed class SitiosTests : IClassFixture<BaseDatosPrueba>, IAsyncLifetime
     }
 
     [Fact]
+    public async Task Fotos_de_un_sitio_sin_capturas_es_una_lista_vacia_y_sin_permiso_o_inexistente_no_se_entrega()
+    {
+        using var nav = await SesionAsync();
+        var id = await CrearAsync(nav, "Sitio sin fotos");
+        Assert.Equal("[]", await nav.GetStringAsync($"/api/sitios/{id}/fotos"));
+        Assert.Equal(HttpStatusCode.NotFound, (await nav.GetAsync($"/api/sitios/{Guid.NewGuid()}/fotos")).StatusCode);
+
+        // Un sitio de una sucursal sin permiso no existe para esta cuenta.
+        var (otraSucursal, ajeno) = (Guid.NewGuid(), Guid.NewGuid());
+        await _bd.SqlComoDuenoAsync($"""
+            INSERT INTO negocio.sucursal(organizacion_id, id, empresa_id, codigo, nombre)
+            SELECT organizacion_id, '{otraSucursal}', empresa_id, 'AJENA-{otraSucursal:N}', 'Sucursal ajena' FROM negocio.sucursal WHERE id = '{Suc}';
+            INSERT INTO negocio.sitio VALUES ('{Org}', '{otraSucursal}', '{ajeno}', 'Sitio de otra sucursal');
+            """);
+        Assert.Equal(HttpStatusCode.NotFound, (await nav.GetAsync($"/api/sitios/{ajeno}/fotos")).StatusCode);
+
+        // Sin permiso de lectura no se llega a las fotos: sin sucursal no entra al panel y, si se le quita con la sesión abierta, la sesión deja de valer.
+        var correo = $"sin-lectura-{Guid.NewGuid():N}@example.invalid";
+        await _bd.AutorizarAsync(correo);
+        using var sinPermiso = _api.NuevoNavegador();
+        Assert.Equal(HttpStatusCode.NoContent, (await sinPermiso.EntrarAsync(ValidadorFicticio.Token($"s-{correo}", correo))).StatusCode);
+        await _bd.SqlComoDuenoAsync($"DELETE FROM seguridad.permiso_sucursal WHERE acceso_id = (SELECT id FROM seguridad.acceso_autorizado WHERE correo_permitido = '{correo}')");
+        Assert.Equal(HttpStatusCode.Unauthorized, (await sinPermiso.GetAsync($"/api/sitios/{id}/fotos")).StatusCode);
+        using var anonimo = _api.NuevoNavegador();
+        Assert.Equal(HttpStatusCode.Unauthorized, (await anonimo.GetAsync($"/api/sitios/{id}/fotos")).StatusCode);
+    }
+
+    [Fact]
     public async Task Valida_nombre_ubicacion_obligatoria_permisos_y_csrf()
     {
         using var nav = await SesionAsync();
@@ -122,7 +150,7 @@ public sealed class SitiosTests : IClassFixture<BaseDatosPrueba>, IAsyncLifetime
         using var nav = await SesionAsync();
         var r = await EnviarAsync(nav, HttpMethod.Post, "/api/clientes", new
         {
-            sucursalId = Suc, nombreComercial = "Cliente Autorizado Sitios Ficticio", autorizacion = "AMB-FICT-SITIOS",
+            sucursalId = Suc, nombreComercial = "Cliente Autorizado Sitios Ficticio", autorizacion = "AMB-FICT-SITIOS", telefono = "5550000099", correo = "fixture@example.invalid",
             sitios = new[] { new { nombre = "Dirección del autorizado", municipio = "Municipio Ficticio", latitud = 25.6m, longitud = -100.3m } },
         });
         Assert.Equal(HttpStatusCode.Created, r.StatusCode);
@@ -145,7 +173,7 @@ public sealed class SitiosTests : IClassFixture<BaseDatosPrueba>, IAsyncLifetime
         using var nav = await SesionAsync();
         var r = await EnviarAsync(nav, HttpMethod.Post, "/api/clientes", new
         {
-            sucursalId = Suc, nombreComercial = "Cliente Autorizado Baja Ficticio", autorizacion = "AMB-FICT-BAJA",
+            sucursalId = Suc, nombreComercial = "Cliente Autorizado Baja Ficticio", autorizacion = "AMB-FICT-BAJA", telefono = "5550000099", correo = "fixture@example.invalid",
             sitios = new[] { new { nombre = "Dirección que se desactiva", municipio = "Municipio Ficticio", latitud = 25.6m, longitud = -100.3m } },
         });
         var cliente = (await r.Content.ReadFromJsonAsync<RevisionGuardada>())!.Id;
@@ -198,7 +226,7 @@ public sealed class SitiosTests : IClassFixture<BaseDatosPrueba>, IAsyncLifetime
         Assert.Equal(HttpStatusCode.BadRequest, (await EnviarAsync(nav, HttpMethod.Put, $"/api/clientes/{id}", new { nombreComercial = "General Editable Ficticio", revision = cliente.Revision, sitios })).StatusCode);
         Assert.Empty(Assert.Single((await nav.GetFromJsonAsync<List<ClienteResumen>>("/api/clientes"))!, c => c.Id == id).Sitios!);
         // Si la misma solicitud le da autorización, ya es autorizado y sí puede tener direcciones.
-        var autorizado = await EnviarAsync(nav, HttpMethod.Put, $"/api/clientes/{id}", new { nombreComercial = "General Editable Ficticio", autorizacion = "AMB-FICT-EDIT", revision = cliente.Revision, sitios });
+        var autorizado = await EnviarAsync(nav, HttpMethod.Put, $"/api/clientes/{id}", new { nombreComercial = "General Editable Ficticio", autorizacion = "AMB-FICT-EDIT", telefono = "5550000099", correo = "fixture@example.invalid", revision = cliente.Revision, sitios });
         Assert.Equal(HttpStatusCode.OK, autorizado.StatusCode);
         Assert.Single(Assert.Single((await nav.GetFromJsonAsync<List<ClienteResumen>>("/api/clientes"))!, c => c.Id == id).Sitios!);
     }
@@ -209,7 +237,7 @@ public sealed class SitiosTests : IClassFixture<BaseDatosPrueba>, IAsyncLifetime
         using var nav = await SesionAsync();
         var alta = await EnviarAsync(nav, HttpMethod.Post, "/api/clientes", new
         {
-            sucursalId = Suc, nombreComercial = "Autorizado Con Parada Ficticio", autorizacion = "AMB-FICT-PARADA",
+            sucursalId = Suc, nombreComercial = "Autorizado Con Parada Ficticio", autorizacion = "AMB-FICT-PARADA", telefono = "5550000099", correo = "fixture@example.invalid",
             sitios = new[] { new { nombre = "Direccion con parada", municipio = "Municipio Ficticio", latitud = 25.6m, longitud = -100.3m } },
         });
         var id = (await alta.Content.ReadFromJsonAsync<RevisionGuardada>())!.Id;
@@ -227,7 +255,7 @@ public sealed class SitiosTests : IClassFixture<BaseDatosPrueba>, IAsyncLifetime
         Assert.True(Assert.Single((await nav.GetFromJsonAsync<List<ClienteResumen>>("/api/clientes"))!, c => c.Id == id).Sitios!.Single().EnRuta);
         var eliminar = await EnviarAsync(nav, HttpMethod.Put, $"/api/clientes/{id}", new
         {
-            nombreComercial = "Autorizado Con Parada Ficticio", autorizacion = "AMB-FICT-PARADA", revision = cliente.Revision,
+            nombreComercial = "Autorizado Con Parada Ficticio", autorizacion = "AMB-FICT-PARADA", telefono = "5550000099", correo = "fixture@example.invalid", revision = cliente.Revision,
             sitios = new[] { new { sitio.SitioId, sitio.Revision, sitio.RevisionFicha, eliminar = true } },
         });
         Assert.Equal(HttpStatusCode.BadRequest, eliminar.StatusCode);

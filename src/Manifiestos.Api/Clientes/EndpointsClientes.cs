@@ -14,6 +14,8 @@ public static class EndpointsClientes
     public const string MensajeSinPermiso = "No tienes permiso para modificar clientes en esta sucursal.";
     public const string MensajeNoEncontrado = "No se encontró el cliente.";
     public const string MensajeCorreoInvalido = "El correo no tiene un formato válido.";
+    public const string MensajeSinTelefono = "Escribe el teléfono del cliente autorizado.";
+    public const string MensajeSinCorreo = "Escribe el correo del cliente autorizado.";
 
     public static IServiceCollection AgregarClientes(this IServiceCollection services) =>
         services.AddSingleton<IRepositorioClientes, RepositorioClientes>();
@@ -99,6 +101,9 @@ public static class EndpointsClientes
         var c = campos.Select(x => string.IsNullOrWhiteSpace(x) ? null : x.Trim()).ToArray();
         if (c[0] is null && c[1] is null) return Error(RepositorioClientes.MensajeSinNombre);
         if (c.Any(x => x?.Length > LargoMaximoCampo)) return Error($"Cada dato del cliente admite hasta {LargoMaximoCampo} caracteres.");
+        // Autorizado (trae autorización): teléfono y correo principal salen en el manifiesto como generador (decisión 0048).
+        if (c[11] is not null && c[9] is null) return Error(MensajeSinTelefono);
+        if (c[11] is not null && c[10] is null) return Error(MensajeSinCorreo);
         if (c[10] is { } correo && !CorreoValido(correo) || c[13] is { } correo2 && !CorreoValido(correo2)) return Error(MensajeCorreoInvalido);
         datos = new DatosCliente(c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[8], c[9], c[10], c[11], Contacto: c[12], Correo2: c[13]);
         return null;

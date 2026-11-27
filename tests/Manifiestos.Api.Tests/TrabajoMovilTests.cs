@@ -186,6 +186,62 @@ public sealed class TrabajoMovilTests(BaseDatosPrueba bd) : IClassFixture<BaseDa
     }
 
     [Fact]
+    public async Task Cada_parada_trae_las_coordenadas_de_su_sitio_o_null_y_cambiarlas_cambia_la_huella()
+    {
+        var yo = await EquipoAsync();
+        var (jornada, parada, cliente) = await RutaAsync(yo.Persona, fosas: 1, autorizado: true, "programada");
+        var c = await SesionAsync(yo);
+        async Task<(JsonElement[] Paradas, string Etag)> LeerAsync()
+        {
+            var r = await c.GetAsync($"/api/movil/trabajo?fecha={Hoy}");
+            var t = JsonDocument.Parse(await r.Content.ReadAsStringAsync()).RootElement.Clone();
+            return (t.GetProperty("jornadas").EnumerateArray().Single(x => x.GetProperty("jornadaId").GetGuid() == jornada).GetProperty("paradas").EnumerateArray().ToArray(), r.Headers.ETag!.ToString());
+        }
+        async Task<HttpStatusCode> ConHuellaAsync(string etag)
+        {
+            var req = new HttpRequestMessage(HttpMethod.Get, $"/api/movil/trabajo?fecha={Hoy}");
+            req.Headers.TryAddWithoutValidation("If-None-Match", etag);
+            return (await c.SendAsync(req)).StatusCode;
+        }
+
+        // Sitio sin ubicación: los campos van, en null.
+        var (sin, etagSin) = await LeerAsync();
+        var p = Assert.Single(sin);
+        Assert.Equal(JsonValueKind.Null, p.GetProperty("latitud").ValueKind);
+        Assert.Equal(JsonValueKind.Null, p.GetProperty("longitud").ValueKind);
+        Assert.Equal(HttpStatusCode.NotModified, await ConHuellaAsync(etagSin));
+
+        // Se le pone ubicación al sitio y se agrega una extraordinaria en otro sitio que también la tiene.
+        var (sitioExtra, extra) = (Guid.NewGuid(), Guid.NewGuid());
+        await bd.SqlComoDuenoAsync($"""
+            BEGIN;
+            INSERT INTO negocio.ficha_sitio(organizacion_id, sucursal_id, sitio_id, revision, nombre, latitud, longitud)
+            SELECT '{Org}', '{Suc}', sitio_id, 1, 'Sitio con punto', 25.686600, -100.316100 FROM negocio.parada_version WHERE parada_id = '{parada}';
+            INSERT INTO negocio.sitio VALUES ('{Org}', '{Suc}', '{sitioExtra}', 'Sitio extra');
+            INSERT INTO negocio.punto_servicio VALUES ('{Org}', '{Suc}', '{sitioExtra}');
+            INSERT INTO negocio.ficha_sitio(organizacion_id, sucursal_id, sitio_id, revision, nombre, latitud, longitud) VALUES ('{Org}', '{Suc}', '{sitioExtra}', 1, 'Sitio extra', 25.700000, -100.300000);
+            INSERT INTO negocio.parada_extraordinaria(organizacion_id, sucursal_id, id, ruta_id, fecha, sitio_id)
+            SELECT '{Org}', '{Suc}', '{extra}', ruta_id, '{Hoy}', '{sitioExtra}' FROM negocio.jornada WHERE id = '{jornada}';
+            INSERT INTO negocio.parada_extraordinaria_cliente(organizacion_id, sucursal_id, parada_extraordinaria_id, cliente_id, fosas_planeadas) VALUES ('{Org}', '{Suc}', '{extra}', '{cliente}', 1);
+            COMMIT;
+            """);
+        var (con, etagCon) = await LeerAsync();
+        (decimal, decimal) Punto(Guid id) { var x = con.Single(q => q.GetProperty("paradaId").GetGuid() == id); return (x.GetProperty("latitud").GetDecimal(), x.GetProperty("longitud").GetDecimal()); }
+        Assert.Equal((25.6866m, -100.3161m), Punto(parada));
+        Assert.Equal((25.7m, -100.3m), Punto(extra));
+        Assert.NotEqual(etagSin, etagCon);
+
+        // Solo cambiar las coordenadas cambia la huella; sin cambios sigue siendo 304.
+        Assert.Equal(HttpStatusCode.NotModified, await ConHuellaAsync(etagCon));
+        await bd.SqlComoDuenoAsync($"""
+            INSERT INTO negocio.ficha_sitio(organizacion_id, sucursal_id, sitio_id, revision, nombre, latitud, longitud) VALUES ('{Org}', '{Suc}', '{sitioExtra}', 2, 'Sitio extra', 25.710000, -100.300000);
+            """);
+        var (movido, etagMovido) = await LeerAsync();
+        Assert.Equal(25.71m, movido.Single(q => q.GetProperty("paradaId").GetGuid() == extra).GetProperty("latitud").GetDecimal());
+        Assert.NotEqual(etagCon, etagMovido);
+    }
+
+    [Fact]
     public async Task Fecha_invalida_o_fuera_de_rango_y_acceso_sin_sesion_se_rechazan()
     {
         var yo = await EquipoAsync(); var c = await SesionAsync(yo);

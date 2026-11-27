@@ -18,8 +18,13 @@ public sealed record SolicitudSitio(
     Guid? SucursalId, int? Revision, string? Nombre, string? Calle, string? NumeroExterior, string? Colonia,
     string? CodigoPostal, string? Municipio, string? Estado, decimal? Latitud, decimal? Longitud);
 
+/// <summary>Dónde y cuándo se tomó una foto de servicio en un sitio.</summary>
+public sealed record FotoDeSitio(DateTimeOffset En, decimal Latitud, decimal Longitud, decimal Precision);
+
 public interface IRepositorioSitios
 {
+    /// <summary>null = el sitio no existe o es de una sucursal sin permiso de lectura.</summary>
+    Task<IReadOnlyList<FotoDeSitio>?> FotosAsync(Guid organizacion, Guid acceso, Guid sitio, CancellationToken ct);
     Task<IReadOnlyList<SitioResumen>> ListarAsync(Guid organizacion, Guid acceso, CancellationToken ct);
     Task<ResultadoEscritura> CrearAsync(Guid organizacion, Guid acceso, Guid sucursal, DatosSitio datos, CancellationToken ct);
     Task<ResultadoEscritura> EditarAsync(Guid organizacion, Guid acceso, Guid sitio, DatosSitio datos, int revision, CancellationToken ct);
@@ -85,6 +90,67 @@ public sealed class RepositorioSitios(NpgsqlDataSource datos) : IRepositorioSiti
         }
         await tx.ConfirmarAsync(ct);
         return lista;
+    }
+
+    public const int DiasDeFotos = 90, MaximoDeFotos = 50;
+
+    /// <summary>
+    /// Fotos de servicio del sitio en los últimos <see cref="DiasDeFotos"/> días, de la más reciente a la más antigua. Baños y fosa propia guardan
+    /// su sitio (succion_parada); la fosa fija se liga por su orden derivada (md5 de jornada, parada, cliente y vuelta, como en el trabajo del
+    /// operador) con las paradas que tenían este sitio al capturar. Aísla por organización y sucursal (RLS y filtro por la sucursal del sitio).
+    /// </summary>
+    public async Task<IReadOnlyList<FotoDeSitio>?> FotosAsync(Guid organizacion, Guid acceso, Guid sitio, CancellationToken ct)
+    {
+        await using var tx = await TransaccionContexto.AbrirAsync(datos, organizacion, acceso, ct);
+        Guid sucursal;
+        await using (var cmd = tx.Comando("SELECT sucursal_id FROM negocio.sitio WHERE organizacion_id = $1 AND id = $2 AND seguridad.puede(organizacion_id, sucursal_id, 'datos.leer')", organizacion, sitio))
+        {
+            if (await cmd.ExecuteScalarAsync(ct) is not Guid encontrada) return null;
+            sucursal = encontrada;
+        }
+        var fotos = new List<FotoDeSitio>();
+        await using (var cmd = tx.Comando($"""
+            WITH candidatas AS (
+                SELECT pv.parada_id, pc.cliente_id, false AS extraordinaria
+                FROM negocio.parada_version pv
+                JOIN negocio.parada_version otras ON (otras.organizacion_id, otras.sucursal_id, otras.parada_id) = (pv.organizacion_id, pv.sucursal_id, pv.parada_id)
+                JOIN negocio.parada_cliente pc ON (pc.organizacion_id, pc.sucursal_id, pc.version_id) = (otras.organizacion_id, otras.sucursal_id, otras.id)
+                WHERE pv.organizacion_id = $1 AND pv.sucursal_id = $2 AND pv.sitio_id = $3
+                UNION
+                SELECT pe.id, pc.cliente_id, true
+                FROM negocio.parada_extraordinaria pe
+                JOIN negocio.parada_extraordinaria_cliente pc ON (pc.organizacion_id, pc.sucursal_id, pc.parada_extraordinaria_id) = (pe.organizacion_id, pe.sucursal_id, pe.id)
+                WHERE pe.organizacion_id = $1 AND pe.sucursal_id = $2 AND pe.sitio_id = $3
+            ), capturas AS (
+                SELECT sp.captura_id, sp.fecha_captura AS en
+                FROM negocio.succion_parada sp
+                WHERE sp.organizacion_id = $1 AND sp.sucursal_id = $2 AND sp.sitio_id = $3 AND sp.fecha_captura >= now() - interval '{DiasDeFotos} days'
+                  AND negocio.captura_aplicable(sp.organizacion_id, sp.sucursal_id, sp.captura_id)
+                UNION
+                SELECT ct.captura_id, k.ocurrida_en
+                FROM negocio.captura_trabajo_efectiva ct
+                JOIN negocio.captura k ON (k.organizacion_id, k.sucursal_id, k.id) = (ct.organizacion_id, ct.sucursal_id, ct.captura_id)
+                WHERE ct.organizacion_id = $1 AND ct.sucursal_id = $2 AND ct.tipo = 'SERVICIO_OPERADOR' AND k.ocurrida_en >= now() - interval '{DiasDeFotos} days'
+                  AND negocio.captura_aplicable(ct.organizacion_id, ct.sucursal_id, ct.captura_id)
+                  AND EXISTS (
+                      SELECT 1 FROM candidatas c CROSS JOIN generate_series(1, 100) n
+                      WHERE md5(ct.jornada_id::text || ':' || c.parada_id::text || ':' || c.cliente_id::text || ':' || n)::uuid = ct.orden_derivada_id
+                        AND (c.extraordinaria OR $3 = (SELECT x.sitio_id FROM negocio.parada_version x
+                                WHERE x.organizacion_id = $1 AND x.sucursal_id = $2 AND x.parada_id = c.parada_id
+                                ORDER BY (x.registrada_en <= k.ocurrida_en) DESC, CASE WHEN x.registrada_en <= k.ocurrida_en THEN -x.revision ELSE x.revision END
+                                LIMIT 1)))
+            )
+            SELECT c.en, e.latitud, e.longitud, e.precision_metros
+            FROM capturas c
+            JOIN negocio.evidencia_captura e ON e.organizacion_id = $1 AND e.sucursal_id = $2 AND e.captura_id = c.captura_id AND e.rol = 'FOTO'
+            ORDER BY c.en DESC
+            LIMIT {MaximoDeFotos}
+            """, organizacion, sucursal, sitio))
+        await using (var r = await cmd.ExecuteReaderAsync(ct))
+            while (await r.ReadAsync(ct))
+                fotos.Add(new FotoDeSitio(r.GetFieldValue<DateTimeOffset>(0), r.GetDecimal(1), r.GetDecimal(2), r.GetDecimal(3)));
+        await tx.ConfirmarAsync(ct);
+        return fotos;
     }
 
     public async Task<ResultadoEscritura> CrearAsync(Guid organizacion, Guid acceso, Guid sucursal, DatosSitio d, CancellationToken ct)

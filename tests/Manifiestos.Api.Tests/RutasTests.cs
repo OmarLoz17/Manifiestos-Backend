@@ -572,7 +572,7 @@ public sealed class RutasTests : IClassFixture<BaseDatosPrueba>, IAsyncLifetime
     public async Task Baja_y_alta_de_parada_concurrentes_no_dejan_direccion_eliminada_en_uso()
     {
         using var nav=await SesionAsync(escribir:true);
-        var alta=await EnviarAsync(nav,HttpMethod.Post,"/api/clientes",new {sucursalId=Suc,nombreComercial="Cliente Concurrente Ficticio",autorizacion="AMB-FICT-CONC",sitios=new[]{new {nombre="Sitio Concurrente Ficticio",calle="Calle Ficticia",banos=5,fosas=0}}});
+        var alta=await EnviarAsync(nav,HttpMethod.Post,"/api/clientes",new {sucursalId=Suc,nombreComercial="Cliente Concurrente Ficticio",autorizacion="AMB-FICT-CONC",telefono="5550000099",correo="fixture@example.invalid",sitios=new[]{new {nombre="Sitio Concurrente Ficticio",calle="Calle Ficticia",banos=5,fosas=0,latitud=25.6m,longitud=-100.3m}}});
         Assert.Equal(HttpStatusCode.Created,alta.StatusCode);
         var id=(await alta.Content.ReadFromJsonAsync<RevisionGuardada>())!.Id;
         var cliente=Assert.Single((await nav.GetFromJsonAsync<List<Manifiestos.Api.Clientes.ClienteResumen>>("/api/clientes"))!,c=>c.Id==id);
@@ -600,8 +600,8 @@ public sealed class RutasTests : IClassFixture<BaseDatosPrueba>, IAsyncLifetime
     public async Task Registra_varias_direcciones_y_sugiere_inventario_sin_confundir_domicilio_fiscal()
     {
         using var nav=await SesionAsync(escribir:true);
-        object Sitio(string nombre,string municipio,int banos,int fosas)=>new {nombre,calle="Calle de Servicio Ficticia",numeroExterior="7",municipio,banos,fosas};
-        var creado=await EnviarAsync(nav,HttpMethod.Post,"/api/clientes",new {sucursalId=Suc,nombreComercial="Cliente Multisitio Ficticio",autorizacion="AMB-FICT-MULTI",calle="Domicilio Fiscal Ficticio",sitios=new[]{Sitio("Baños Norte","Municipio Norte",10,0),Sitio("Fosa Sur","Municipio Sur",0,2)}});
+        object Sitio(string nombre,string municipio,int banos,int fosas)=>new {nombre,calle="Calle de Servicio Ficticia",numeroExterior="7",municipio,banos,fosas,latitud=25.6m,longitud=-100.3m};
+        var creado=await EnviarAsync(nav,HttpMethod.Post,"/api/clientes",new {sucursalId=Suc,nombreComercial="Cliente Multisitio Ficticio",autorizacion="AMB-FICT-MULTI",telefono="5550000099",correo="fixture@example.invalid",calle="Domicilio Fiscal Ficticio",sitios=new[]{Sitio("Baños Norte","Municipio Norte",10,0),Sitio("Fosa Sur","Municipio Sur",0,2)}});
         Assert.Equal(HttpStatusCode.Created,creado.StatusCode);
         var id=(await creado.Content.ReadFromJsonAsync<RevisionGuardada>())!.Id;
         var cliente=Assert.Single((await nav.GetFromJsonAsync<List<Manifiestos.Api.Clientes.ClienteResumen>>("/api/clientes"))!,c=>c.Id==id);
@@ -617,9 +617,9 @@ public sealed class RutasTests : IClassFixture<BaseDatosPrueba>, IAsyncLifetime
         Assert.Equal(HttpStatusCode.BadRequest,ajena.StatusCode);
 
         var cambio=fosa with { Calle="Calle de Servicio Corregida",Fosas=3 };
-        var guardar=await EnviarAsync(nav,HttpMethod.Put,$"/api/clientes/{id}",new {autorizacion="AMB-FICT-MULTI",nombreComercial=cliente.NombreComercial,calle=cliente.Calle,revision=cliente.Revision,sitios=new[]{cambio}});
+        var guardar=await EnviarAsync(nav,HttpMethod.Put,$"/api/clientes/{id}",new {autorizacion="AMB-FICT-MULTI",telefono="5550000099",correo="fixture@example.invalid",nombreComercial=cliente.NombreComercial,calle=cliente.Calle,revision=cliente.Revision,sitios=new[]{cambio}});
         Assert.Equal(HttpStatusCode.OK,guardar.StatusCode);
-        var vieja=await EnviarAsync(nav,HttpMethod.Put,$"/api/clientes/{id}",new {autorizacion="AMB-FICT-MULTI",nombreComercial=cliente.NombreComercial,calle=cliente.Calle,revision=cliente.Revision,sitios=new[]{fosa}});
+        var vieja=await EnviarAsync(nav,HttpMethod.Put,$"/api/clientes/{id}",new {autorizacion="AMB-FICT-MULTI",telefono="5550000099",correo="fixture@example.invalid",nombreComercial=cliente.NombreComercial,calle=cliente.Calle,revision=cliente.Revision,sitios=new[]{fosa}});
         Assert.Equal(HttpStatusCode.Conflict,vieja.StatusCode);
         var actual=Assert.Single((await nav.GetFromJsonAsync<List<Manifiestos.Api.Clientes.ClienteResumen>>("/api/clientes"))!,c=>c.Id==id);
         Assert.Equal(2,actual.Sitios!.Count); // Omitir la otra dirección no la borra.
@@ -628,12 +628,12 @@ public sealed class RutasTests : IClassFixture<BaseDatosPrueba>, IAsyncLifetime
         Assert.Single(await ParadasAsync(nav,ruta.Id));
         object Baja(Manifiestos.Api.Clientes.SitioCliente s)=>new {s.SitioId,s.Revision,s.RevisionFicha,eliminar=true};
         var usada=actual.Sitios.Single(s=>s.SitioId==fosa.SitioId);
-        var noBorrar=await EnviarAsync(nav,HttpMethod.Put,$"/api/clientes/{id}",new {autorizacion="AMB-FICT-MULTI",nombreComercial="No debe guardarse",revision=actual.Revision,sitios=new[]{Baja(usada)}});
+        var noBorrar=await EnviarAsync(nav,HttpMethod.Put,$"/api/clientes/{id}",new {autorizacion="AMB-FICT-MULTI",telefono="5550000099",correo="fixture@example.invalid",nombreComercial="No debe guardarse",revision=actual.Revision,sitios=new[]{Baja(usada)}});
         Assert.Equal(HttpStatusCode.BadRequest,noBorrar.StatusCode);
         var despues=Assert.Single((await nav.GetFromJsonAsync<List<Manifiestos.Api.Clientes.ClienteResumen>>("/api/clientes"))!,c=>c.Id==id);
         Assert.Equal(actual.NombreComercial,despues.NombreComercial); // Todo el envío se revierte.
         var libre=actual.Sitios.Single(s=>s.SitioId!=fosa.SitioId);
-        var borrar=await EnviarAsync(nav,HttpMethod.Put,$"/api/clientes/{id}",new {autorizacion="AMB-FICT-MULTI",nombreComercial=actual.NombreComercial,calle=actual.Calle,revision=actual.Revision,sitios=new[]{Baja(libre)}});
+        var borrar=await EnviarAsync(nav,HttpMethod.Put,$"/api/clientes/{id}",new {autorizacion="AMB-FICT-MULTI",telefono="5550000099",correo="fixture@example.invalid",nombreComercial=actual.NombreComercial,calle=actual.Calle,revision=actual.Revision,sitios=new[]{Baja(libre)}});
         Assert.Equal(HttpStatusCode.OK,borrar.StatusCode);
         despues=Assert.Single((await nav.GetFromJsonAsync<List<Manifiestos.Api.Clientes.ClienteResumen>>("/api/clientes"))!,c=>c.Id==id);
         Assert.Equal(fosa.SitioId,Assert.Single(despues.Sitios!).SitioId);

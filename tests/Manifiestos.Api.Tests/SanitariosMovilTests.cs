@@ -380,6 +380,13 @@ public sealed partial class SanitariosMovilTests(BaseDatosPrueba bd) : IClassFix
         var captura = Assert.Single(atendida.GetProperty("capturas").EnumerateArray());
         Assert.Equal((25.6702m, -100.3091m), (captura.GetProperty("latitud").GetDecimal(), captura.GetProperty("longitud").GetDecimal()));
         Assert.Equal(8m, captura.GetProperty("precision").GetDecimal());
+        // Las fotos del sitio (Fase 2 de la Decisión 0048): solo las de ese sitio.
+        async Task<int> FotosDeParadaAsync(Guid parada)
+        {
+            var sitio = await bd.ConsultarAsync($"SELECT sitio_id FROM negocio.parada_version WHERE parada_id='{parada}'");
+            return JsonDocument.Parse(await web.GetStringAsync($"/api/sitios/{sitio}/fotos")).RootElement.GetArrayLength();
+        }
+        Assert.Equal((1, 0), (await FotosDeParadaAsync(e.ParadaA), await FotosDeParadaAsync(e.ParadaB)));
         // Tirada en la planta: la parada pasa a tirada.
         Assert.Equal(HttpStatusCode.OK, (await EnviarAsync(s.Http, Succion(s, e, c2, e.ParadaC, e.Jornada2, 40, 8, fecha: Ahora(-60)))).StatusCode);
         Assert.Equal(HttpStatusCode.OK, (await EnviarAsync(s.Http, Tirada(s, e, capTirada, tirada, [c1, c2]))).StatusCode);

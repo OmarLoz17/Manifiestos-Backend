@@ -87,7 +87,7 @@ public sealed class ClientesTests : IClassFixture<BaseDatosPrueba>, IAsyncLifeti
         """.ReplaceLineEndings(" "));
 
     private static object Edicion(int revision, string nombreFiscal = "Editado Ficticio SA", string? autorizacion = null, string? correo = null) =>
-        new { nombreFiscal, nombreComercial = (string?)null, autorizacion, correo, revision };
+        new { nombreFiscal, nombreComercial = (string?)null, autorizacion, telefono = "5550000099", correo = correo ?? "fixture@example.invalid", revision };
 
     // ---------------- Lectura ----------------
 
@@ -95,9 +95,9 @@ public sealed class ClientesTests : IClassFixture<BaseDatosPrueba>, IAsyncLifeti
     public async Task Sitios_se_guardan_independientes_de_la_ficha_con_permisos_y_csrf()
     {
         using var nav = await SesionAsync(true);
-        var creado = await CrearAsync(nav, new { sucursalId = Suc, nombreFiscal = "Cliente de obra ficticio", autorizacion = "AMB-FICT-OBRA", calle = "Domicilio fiscal ficticio" });
+        var creado = await CrearAsync(nav, new { sucursalId = Suc, nombreFiscal = "Cliente de obra ficticio", autorizacion = "AMB-FICT-OBRA", telefono = "5550000099", correo = "fixture@example.invalid", calle = "Domicilio fiscal ficticio" });
         var url = $"/api/clientes/{creado.Id}/sitios";
-        var cuerpo = new { sitios = new[] { new { nombre = "Obra sin catálogo", estado = "Estado manual", municipio = "Municipio manual", banos = 10, fosas = 1 } } };
+        var cuerpo = new { sitios = new[] { new { nombre = "Obra sin catálogo", estado = "Estado manual", municipio = "Municipio manual", banos = 10, fosas = 1, latitud = 25.6m, longitud = -100.3m } } };
         Assert.False((await EnviarAsync(nav, HttpMethod.Put, url, cuerpo, conCsrf: false)).IsSuccessStatusCode);
         Assert.Equal(HttpStatusCode.NoContent, (await EnviarAsync(nav, HttpMethod.Put, url, cuerpo)).StatusCode);
         var actual = await ClienteAsync(nav, creado.Id);
@@ -118,7 +118,7 @@ public sealed class ClientesTests : IClassFixture<BaseDatosPrueba>, IAsyncLifeti
     public async Task Sitio_guarda_coordenadas_aproximadas_como_revision_y_valida_el_par()
     {
         using var nav = await SesionAsync(true);
-        var creado = await CrearAsync(nav, new { sucursalId = Suc, nombreFiscal = "Cliente con mapa ficticio", autorizacion = "AMB-FICT-MAPA" });
+        var creado = await CrearAsync(nav, new { sucursalId = Suc, nombreFiscal = "Cliente con mapa ficticio", autorizacion = "AMB-FICT-MAPA", telefono = "5550000099", correo = "fixture@example.invalid" });
         var url = $"/api/clientes/{creado.Id}/sitios";
         Assert.Equal(HttpStatusCode.BadRequest, (await EnviarAsync(nav, HttpMethod.Put, url, new { sitios = new[] { new { nombre = "Solo latitud", latitud = 25.68m } } })).StatusCode);
         Assert.Equal(HttpStatusCode.BadRequest, (await EnviarAsync(nav, HttpMethod.Put, url, new { sitios = new[] { new { nombre = "Fuera de rango", latitud = 95m, longitud = -100m } } })).StatusCode);
@@ -127,12 +127,10 @@ public sealed class ClientesTests : IClassFixture<BaseDatosPrueba>, IAsyncLifeti
         Assert.Equal(25.686612m, sitio.Latitud);
         Assert.Equal(-100.316113m, sitio.Longitud);
         Assert.Equal(1, sitio.RevisionFicha);
-        // Quitar el punto es una revisión nueva de la ficha.
+        // El punto ya no se puede quitar: toda dirección editada lo exige (decisión 0048).
         var quitar = new { sitios = new[] { new { sitioId = sitio.SitioId, revision = sitio.Revision, revisionFicha = sitio.RevisionFicha, nombre = "Obra con punto" } } };
-        Assert.Equal(HttpStatusCode.NoContent, (await EnviarAsync(nav, HttpMethod.Put, url, quitar)).StatusCode);
-        var sin = Assert.Single((await ClienteAsync(nav, creado.Id)).Sitios!);
-        Assert.Null(sin.Latitud);
-        Assert.Equal(2, sin.RevisionFicha);
+        await AfirmarErrorAsync(await EnviarAsync(nav, HttpMethod.Put, url, quitar), HttpStatusCode.BadRequest, "Elige la ubicación del sitio en el mapa.");
+        Assert.Equal(sitio, Assert.Single((await ClienteAsync(nav, creado.Id)).Sitios!));
     }
 
     [Fact]
@@ -350,7 +348,7 @@ public sealed class ClientesTests : IClassFixture<BaseDatosPrueba>, IAsyncLifeti
     public async Task Quitar_autorizacion_responde_400_sin_cambios()
     {
         var nav = await SesionAsync(escribir: true);
-        var c = await CrearAsync(nav, new { sucursalId = Suc, nombreFiscal = "Con Autorización Ficticia SA", autorizacion = "MA-QUITAR" });
+        var c = await CrearAsync(nav, new { sucursalId = Suc, nombreFiscal = "Con Autorización Ficticia SA", autorizacion = "MA-QUITAR", telefono = "5550000099", correo = "fixture@example.invalid" });
         var antes = await HuellaAsync();
 
         // Aunque también cambie el nombre, la corrección completa se rechaza.
@@ -366,13 +364,13 @@ public sealed class ClientesTests : IClassFixture<BaseDatosPrueba>, IAsyncLifeti
     public async Task Cambio_ajeno_solo_de_autorizacion_responde_409_sin_cambios()
     {
         var nav = await SesionAsync(escribir: true);
-        var c = await CrearAsync(nav, new { sucursalId = Suc, nombreFiscal = "Concurrente Ficticio SA", autorizacion = "MA-1" });
+        var c = await CrearAsync(nav, new { sucursalId = Suc, nombreFiscal = "Concurrente Ficticio SA", autorizacion = "MA-1", telefono = "5550000099", correo = "fixture@example.invalid" });
         var url = $"/api/clientes/{c.Id}";
 
         // A y B abren la revisión 1 con MA-1. A cambia solo la autorización: la ficha sigue en la revisión 1.
         var r = await EnviarAsync(nav, HttpMethod.Put, url, new
         {
-            nombreFiscal = "Concurrente Ficticio SA", autorizacion = "MA-2", revision = 1, autorizacionVista = "MA-1",
+            nombreFiscal = "Concurrente Ficticio SA", telefono = "5550000099", correo = "fixture@example.invalid", autorizacion = "MA-2", revision = 1, autorizacionVista = "MA-1",
         });
         Assert.Equal(new RevisionGuardada(c.Id, 1), await r.Content.ReadFromJsonAsync<RevisionGuardada>());
 
@@ -380,22 +378,22 @@ public sealed class ClientesTests : IClassFixture<BaseDatosPrueba>, IAsyncLifeti
         var antes = await HuellaAsync();
         await AfirmarErrorAsync(await EnviarAsync(nav, HttpMethod.Put, url, new
         {
-            nombreFiscal = "Concurrente Ficticio SA", telefono = "5550000009", autorizacion = "MA-1", revision = 1, autorizacionVista = "MA-1",
+            nombreFiscal = "Concurrente Ficticio SA", telefono = "5550000009", correo = "fixture@example.invalid", autorizacion = "MA-1", revision = 1, autorizacionVista = "MA-1",
         }), HttpStatusCode.Conflict, RepositorioClientes.MensajeClienteModificado);
         Assert.Equal(antes, await HuellaAsync());
         var cliente = await ClienteAsync(nav, c.Id);
-        Assert.Equal(("MA-2", (string?)null), (cliente.Autorizacion, cliente.Telefono));
+        Assert.Equal(("MA-2", "5550000099"), (cliente.Autorizacion, cliente.Telefono));
 
         // Un cliente general se ve como "" : si alguien le registró autorización, también es conflicto.
-        var g = await CrearAsync(nav, new { sucursalId = Suc, nombreFiscal = "General Concurrente SA" });
+        var g = await CrearAsync(nav, new { sucursalId = Suc, nombreFiscal = "General Concurrente SA", telefono = "5550000099", correo = "fixture@example.invalid" });
         Assert.Equal(HttpStatusCode.OK, (await EnviarAsync(nav, HttpMethod.Put, $"/api/clientes/{g.Id}", new
         {
-            nombreFiscal = "General Concurrente SA", autorizacion = "MA-G", revision = 1, autorizacionVista = "",
+            nombreFiscal = "General Concurrente SA", telefono = "5550000099", correo = "fixture@example.invalid", autorizacion = "MA-G", revision = 1, autorizacionVista = "",
         })).StatusCode);
         antes = await HuellaAsync();
         await AfirmarErrorAsync(await EnviarAsync(nav, HttpMethod.Put, $"/api/clientes/{g.Id}", new
         {
-            nombreFiscal = "General Concurrente SA", autorizacion = "MA-OTRA", revision = 1, autorizacionVista = "",
+            nombreFiscal = "General Concurrente SA", telefono = "5550000099", correo = "fixture@example.invalid", autorizacion = "MA-OTRA", revision = 1, autorizacionVista = "",
         }), HttpStatusCode.Conflict, RepositorioClientes.MensajeClienteModificado);
         Assert.Equal(antes, await HuellaAsync());
     }
@@ -449,6 +447,140 @@ public sealed class ClientesTests : IClassFixture<BaseDatosPrueba>, IAsyncLifeti
             $"SELECT string_agg(nombre_fiscal || '|' || revision, ',') FROM negocio.ficha_empresa WHERE empresa_id = '{empresa}'"));
     }
 
+    // ---------------- Datos obligatorios de autorizados y de sus direcciones (decisión 0048) ----------------
+
+    private const string SinTelefono = "Escribe el teléfono del cliente autorizado.";
+    private const string SinCorreo = "Escribe el correo del cliente autorizado.";
+    private const string SinPunto = "Elige la ubicación del sitio en el mapa.";
+
+    /// <summary>Autorizado con una dirección que, como las fichas históricas, no tiene coordenadas.</summary>
+    private async Task<(RevisionGuardada Cliente, SitioCliente Sitio)> AutorizadoConDireccionSinPuntoAsync(HttpClient nav)
+    {
+        var c = await CrearAsync(nav, new
+        {
+            sucursalId = Suc, nombreFiscal = "Histórico Ficticio SA", autorizacion = "MA-HIST", telefono = "5550000010", correo = "historico@example.invalid",
+            sitios = new[] { new { nombre = "Dirección histórica", calle = "Calle Ficticia", latitud = 25.6m, longitud = -100.3m } },
+        });
+        var sitio = Assert.Single((await ClienteAsync(nav, c.Id)).Sitios!);
+        await _bd.SqlComoDuenoAsync($"""
+            INSERT INTO negocio.ficha_sitio(organizacion_id, sucursal_id, sitio_id, revision, nombre, calle)
+            VALUES ('{Org}', '{Suc}', '{sitio.SitioId}', {sitio.RevisionFicha + 1}, 'Dirección histórica', 'Calle Ficticia');
+            """);
+        var sin = Assert.Single((await ClienteAsync(nav, c.Id)).Sitios!);
+        Assert.Null(sin.Latitud);
+        return (c, sin);
+    }
+
+    private static object EdicionHistorico(int revision, object sitio) => new
+    {
+        nombreFiscal = "Histórico Ficticio SA", autorizacion = "MA-HIST", telefono = "5550000011", correo = "historico@example.invalid",
+        revision, sitios = new[] { sitio },
+    };
+
+    private static object SinCambios(SitioCliente s, string? calle = null) =>
+        new { s.SitioId, s.Revision, s.RevisionFicha, s.Nombre, calle = calle ?? s.Calle, s.Banos, s.Fosas, s.FosaPropia };
+
+    [Fact]
+    public async Task Autorizado_exige_telefono_y_correo_al_crear()
+    {
+        var nav = await SesionAsync(escribir: true);
+        var antes = await HuellaAsync();
+        await AfirmarErrorAsync(await EnviarAsync(nav, HttpMethod.Post, "/api/clientes",
+            new { sucursalId = Suc, nombreFiscal = "Sin Teléfono SA", autorizacion = "MA-ST", telefono = "  ", correo = "st@example.invalid" }),
+            HttpStatusCode.BadRequest, SinTelefono);
+        await AfirmarErrorAsync(await EnviarAsync(nav, HttpMethod.Post, "/api/clientes",
+            new { sucursalId = Suc, nombreFiscal = "Sin Correo SA", autorizacion = "MA-SC", telefono = "5550000012", correo2 = "otro@example.invalid" }),
+            HttpStatusCode.BadRequest, SinCorreo);
+        Assert.Equal(antes, await HuellaAsync());
+        await CrearAsync(nav, new { sucursalId = Suc, nombreFiscal = "Completo SA", autorizacion = "MA-OK", telefono = "5550000013", correo = "completo@example.invalid" });
+    }
+
+    [Fact]
+    public async Task General_se_crea_sin_telefono_ni_correo()
+    {
+        var nav = await SesionAsync(escribir: true);
+        var c = await CrearAsync(nav, new { sucursalId = Suc, nombreComercial = "General Sin Datos Ficticio" });
+        var g = await ClienteAsync(nav, c.Id);
+        Assert.Equal(((string?)null, (string?)null), (g.Telefono, g.Correo));
+    }
+
+    [Fact]
+    public async Task Editar_autorizado_sin_correo_exige_capturarlo()
+    {
+        var nav = await SesionAsync(escribir: true);
+        var c = await CrearAsync(nav, new { sucursalId = Suc, nombreFiscal = "Antiguo SA", autorizacion = "MA-ANT", telefono = "5550000014", correo = "antes@example.invalid" });
+        // Ficha histórica sin correo (la API ya no permite capturarla así).
+        await _bd.SqlComoDuenoAsync($"""
+            INSERT INTO negocio.ficha_empresa(organizacion_id, empresa_id, revision, nombre_fiscal, telefono)
+            SELECT organizacion_id, empresa_id, 2, 'Antiguo SA', '5550000014' FROM negocio.cliente WHERE id = '{c.Id}';
+            """);
+        var url = $"/api/clientes/{c.Id}";
+        var antes = await HuellaAsync();
+        await AfirmarErrorAsync(await EnviarAsync(nav, HttpMethod.Put, url,
+            new { nombreFiscal = "Antiguo SA", autorizacion = "MA-ANT", telefono = "5550000014", revision = 2 }), HttpStatusCode.BadRequest, SinCorreo);
+        await AfirmarErrorAsync(await EnviarAsync(nav, HttpMethod.Put, url,
+            new { nombreFiscal = "Antiguo SA", autorizacion = "MA-ANT", correo = "ahora@example.invalid", revision = 2 }), HttpStatusCode.BadRequest, SinTelefono);
+        Assert.Equal(antes, await HuellaAsync());
+        Assert.Equal(HttpStatusCode.OK, (await EnviarAsync(nav, HttpMethod.Put, url,
+            new { nombreFiscal = "Antiguo SA", autorizacion = "MA-ANT", telefono = "5550000014", correo = "ahora@example.invalid", revision = 2 })).StatusCode);
+        Assert.Equal("ahora@example.invalid", (await ClienteAsync(nav, c.Id)).Correo);
+    }
+
+    [Fact]
+    public async Task Direccion_nueva_de_autorizado_exige_coordenadas()
+    {
+        var nav = await SesionAsync(escribir: true);
+        object Alta(object sitio) => new { sucursalId = Suc, nombreFiscal = "Con Dirección SA", autorizacion = "MA-DIR", telefono = "5550000015", correo = "dir@example.invalid", sitios = new[] { sitio } };
+        var antes = await HuellaAsync();
+        await AfirmarErrorAsync(await EnviarAsync(nav, HttpMethod.Post, "/api/clientes", Alta(new { nombre = "Sin punto" })), HttpStatusCode.BadRequest, SinPunto);
+        Assert.Equal(antes, await HuellaAsync());
+
+        var c = await CrearAsync(nav, Alta(new { nombre = "Con punto", latitud = 25.6m, longitud = -100.3m }));
+        var url = $"/api/clientes/{c.Id}/sitios";
+        await AfirmarErrorAsync(await EnviarAsync(nav, HttpMethod.Put, url, new { sitios = new[] { new { nombre = "Otra sin punto" } } }), HttpStatusCode.BadRequest, SinPunto);
+        await AfirmarErrorAsync(await EnviarAsync(nav, HttpMethod.Put, $"/api/clientes/{c.Id}",
+            new { nombreFiscal = "Con Dirección SA", autorizacion = "MA-DIR", telefono = "5550000015", correo = "dir@example.invalid", revision = 1, sitios = new[] { new { nombre = "Otra sin punto" } } }),
+            HttpStatusCode.BadRequest, SinPunto);
+        Assert.Single((await ClienteAsync(nav, c.Id)).Sitios!);
+        Assert.Equal(HttpStatusCode.NoContent, (await EnviarAsync(nav, HttpMethod.Put, url,
+            new { sitios = new[] { new { nombre = "Otra con punto", latitud = 25.7m, longitud = -100.2m } } })).StatusCode);
+        Assert.Equal(2, (await ClienteAsync(nav, c.Id)).Sitios!.Count);
+    }
+
+    [Fact]
+    public async Task Direccion_historica_sin_coordenadas_y_sin_cambios_no_bloquea_el_guardado()
+    {
+        var nav = await SesionAsync(escribir: true);
+        var (c, sitio) = await AutorizadoConDireccionSinPuntoAsync(nav);
+        var r = await EnviarAsync(nav, HttpMethod.Put, $"/api/clientes/{c.Id}", EdicionHistorico(1, SinCambios(sitio)));
+        Assert.Equal(HttpStatusCode.OK, r.StatusCode);
+        var despues = await ClienteAsync(nav, c.Id);
+        Assert.Equal("5550000011", despues.Telefono);
+        Assert.Equal(sitio, Assert.Single(despues.Sitios!));
+        Assert.Equal(HttpStatusCode.NoContent, (await EnviarAsync(nav, HttpMethod.Put, $"/api/clientes/{c.Id}/sitios", new { sitios = new[] { SinCambios(sitio) } })).StatusCode);
+        // Marcada para eliminar: no se valida.
+        Assert.Equal(HttpStatusCode.NoContent, (await EnviarAsync(nav, HttpMethod.Put, $"/api/clientes/{c.Id}/sitios",
+            new { sitios = new[] { new { sitio.SitioId, sitio.Revision, sitio.RevisionFicha, eliminar = true } } })).StatusCode);
+        Assert.Empty((await ClienteAsync(nav, c.Id)).Sitios!);
+    }
+
+    [Fact]
+    public async Task Direccion_historica_sin_coordenadas_con_un_cambio_exige_el_punto()
+    {
+        var nav = await SesionAsync(escribir: true);
+        var (c, sitio) = await AutorizadoConDireccionSinPuntoAsync(nav);
+        var antes = await HuellaAsync();
+        await AfirmarErrorAsync(await EnviarAsync(nav, HttpMethod.Put, $"/api/clientes/{c.Id}", EdicionHistorico(1, SinCambios(sitio, "Calle Corregida"))),
+            HttpStatusCode.BadRequest, SinPunto);
+        await AfirmarErrorAsync(await EnviarAsync(nav, HttpMethod.Put, $"/api/clientes/{c.Id}/sitios", new { sitios = new[] { SinCambios(sitio, "Calle Corregida") } }),
+            HttpStatusCode.BadRequest, SinPunto);
+        Assert.Equal(antes, await HuellaAsync());
+        Assert.Equal(sitio, Assert.Single((await ClienteAsync(nav, c.Id)).Sitios!));
+        Assert.Equal(HttpStatusCode.NoContent, (await EnviarAsync(nav, HttpMethod.Put, $"/api/clientes/{c.Id}/sitios",
+            new { sitios = new[] { new { sitio.SitioId, sitio.Revision, sitio.RevisionFicha, sitio.Nombre, calle = "Calle Corregida", latitud = 25.6m, longitud = -100.3m } } })).StatusCode);
+        Assert.Equal(25.6m, Assert.Single((await ClienteAsync(nav, c.Id)).Sitios!).Latitud);
+    }
+
     // ---------------- Permisos, CSRF y no encontrados ----------------
 
     [Fact]
@@ -459,7 +591,7 @@ public sealed class ClientesTests : IClassFixture<BaseDatosPrueba>, IAsyncLifeti
         Assert.Single(await ListarAsync(nav), x => x.Id == c.Id);
         var antes = await HuellaAsync();
 
-        await AfirmarErrorAsync(await EnviarAsync(nav, HttpMethod.Post, "/api/clientes", new { sucursalId = Suc, nombreFiscal = "No Debe Existir SA", autorizacion = "MA-NO" }),
+        await AfirmarErrorAsync(await EnviarAsync(nav, HttpMethod.Post, "/api/clientes", new { sucursalId = Suc, nombreFiscal = "No Debe Existir SA", autorizacion = "MA-NO", telefono = "5550000099", correo = "fixture@example.invalid" }),
             HttpStatusCode.Forbidden, EndpointsClientes.MensajeSinPermiso);
         await AfirmarErrorAsync(await EnviarAsync(nav, HttpMethod.Put, $"/api/clientes/{c.Id}", Edicion(1, autorizacion: "MA-NO")),
             HttpStatusCode.Forbidden, EndpointsClientes.MensajeSinPermiso);

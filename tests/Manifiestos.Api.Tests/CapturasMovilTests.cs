@@ -53,7 +53,7 @@ public sealed class CapturasMovilTests(BaseDatosPrueba bd) : IClassFixture<BaseD
 
     private static string Sobre(Sesion s, Guid id, string tipo = "SERVICIO_OPERADOR", Guid? persona = null, object[]? evidencias = null,
         bool aceptado = true, object? planta = null, string? nombre = null, object? problema = null, int version = 1,
-        Guid? orden = null, Guid? jornada = null, bool requiereCliente = true)
+        Guid? orden = null, Guid? jornada = null, bool requiereCliente = true, long? fecha = null)
     {
         var o = s.Yo.Operador;
         return JsonSerializer.Serialize(new
@@ -63,7 +63,7 @@ public sealed class CapturasMovilTests(BaseDatosPrueba bd) : IClassFixture<BaseD
                 asignacionEquipoId = o.AsignacionEquipoId, revisionEquipo = o.RevisionEquipo.ToString() },
             trabajo = new { ordenId = orden ?? Guid.NewGuid(), jornadaId = jornada ?? Guid.NewGuid(), asignacionTrabajoId = "a-1", revisionTrabajo = "1",
                 requiereFirmaCliente = requiereCliente, versionDatos = "1", datosOrdenJson = "{\"dato\":\"sintetico\"}" },
-            tipo, fechaEpochMs = 1_790_000_000_000L,
+            tipo, fechaEpochMs = fecha ?? 1_790_000_000_000L,
             evidencias = evidencias ?? [Foto(Guid.NewGuid()), Firma(Guid.NewGuid(), "FIRMA_OPERADOR")],
             aceptado = aceptado && tipo != "PROBLEMA" ? new { version = "fixture-1", textoExacto = "Texto ficticio  exacto" } : null,
             nombreFirmante = nombre, planta, problema,
@@ -334,6 +334,32 @@ public sealed class CapturasMovilTests(BaseDatosPrueba bd) : IClassFixture<BaseD
         var repetir = new HttpRequestMessage(HttpMethod.Post, $"/api/incidencias/por-corregir/sin-ubicar/{ids[0]}/resolver") { Content = JsonContent.Create(new { accion = "corregido" }) };
         repetir.Headers.Add(ServiciosAcceso.CabeceraCsrf, await web.CsrfAsync());
         Assert.Equal(HttpStatusCode.Conflict, (await web.SendAsync(repetir)).StatusCode);
+    }
+
+    [Fact]
+    public async Task Fotos_del_sitio_incluye_las_de_fosa_fija_y_no_las_viejas_ni_las_de_otro_sitio()
+    {
+        var s = await SesionAsync(); var o = await OrdenesAsync(s, fosas: 3, autorizado: true); var otro = await OrdenesAsync(await SesionAsync(), fosas: 1, autorizado: true);
+        var correo = $"fotos-{Guid.NewGuid():N}@example.invalid";
+        await bd.AutorizarAsync(correo);
+        var web = _api.NuevoNavegador();
+        Assert.Equal(HttpStatusCode.NoContent, (await web.EntrarAsync(ValidadorFicticio.Token($"s-{correo}", correo))).StatusCode);
+        async Task<Guid> SitioDeAsync(Orden x) => Guid.Parse(await bd.ConsultarAsync(
+            $"SELECT pv.sitio_id FROM negocio.jornada j JOIN negocio.parada p ON p.ruta_id=j.ruta_id JOIN negocio.parada_version pv ON pv.parada_id=p.id WHERE j.id='{x.Jornada}'"));
+        var sitio = await SitioDeAsync(o);
+        async Task<JsonElement[]> FotosAsync(Guid id) => JsonDocument.Parse(await web.GetStringAsync($"/api/sitios/{id}/fotos")).RootElement.EnumerateArray().ToArray();
+        Assert.Empty(await FotosAsync(sitio));
+
+        long Hace(int dias) => DateTimeOffset.UtcNow.AddDays(-dias).ToUnixTimeMilliseconds();
+        async Task CapturarAsync(int cual, long fecha) => Assert.Equal(HttpStatusCode.OK,
+            (await EnviarAsync(s.Http, Sobre(s, Guid.NewGuid(), orden: o.Ordenes[cual], jornada: o.Jornada, fecha: fecha))).StatusCode);
+        await CapturarAsync(0, Hace(0));
+        await CapturarAsync(1, Hace(120));   // fuera de los 90 días
+
+        var foto = Assert.Single(await FotosAsync(sitio));
+        Assert.Equal((25.6866m, -100.3161m, 8.5m), (foto.GetProperty("latitud").GetDecimal(), foto.GetProperty("longitud").GetDecimal(), foto.GetProperty("precision").GetDecimal()));
+        Assert.Equal(JsonValueKind.String, foto.GetProperty("en").ValueKind);
+        Assert.Empty(await FotosAsync(await SitioDeAsync(otro)));
     }
 
     [Theory]

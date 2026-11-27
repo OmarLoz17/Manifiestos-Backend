@@ -12,6 +12,7 @@ public static class EndpointsSitios
     public const int LargoMaximoCampo = 200;
     public const string MensajeSinPermiso = "No tienes permiso para modificar sitios en esta sucursal. Eliminar es solo del administrador.";
     public const string MensajeNoEncontrado = "No se encontró el sitio.";
+    public const string MensajeSinUbicacion = "Elige la ubicación del sitio en el mapa.";
 
     public static IServiceCollection AgregarSitios(this IServiceCollection services) =>
         services.AddSingleton<IRepositorioSitios, RepositorioSitios>();
@@ -20,6 +21,7 @@ public static class EndpointsSitios
     {
         var g = app.MapGroup("/api/sitios");
         g.MapGet("", ListarAsync);
+        g.MapGet("/{id:guid}/fotos", FotosAsync);
         g.MapPost("", CrearAsync).AddEndpointFilter(EndpointsAcceso.ValidarCsrf);
         g.MapPut("/{id:guid}", EditarAsync).AddEndpointFilter(EndpointsAcceso.ValidarCsrf);
         g.MapDelete("/{id:guid}", EliminarAsync).AddEndpointFilter(EndpointsAcceso.ValidarCsrf);
@@ -30,6 +32,17 @@ public static class EndpointsSitios
         if (!ServiciosAcceso.LeerIds(http.User, out var org, out var acceso)) return Results.Unauthorized();
         http.Response.Headers.CacheControl = "no-store";
         return Results.Ok(await sitios.ListarAsync(org, acceso, http.RequestAborted));
+    }
+
+    /// <summary>Dónde se tomaron las fotos de servicio del sitio (normal o dirección de un autorizado): solo lectura, para revisar su punto.</summary>
+    private static async Task<IResult> FotosAsync(Guid id, HttpContext http, IRepositorioSitios sitios)
+    {
+        if (!ServiciosAcceso.LeerIds(http.User, out var org, out var acceso)) return Results.Unauthorized();
+        http.Response.Headers.CacheControl = "no-store";
+        // Sin permiso de lectura no hay sesión del panel; un sitio fuera de las sucursales visibles responde como inexistente.
+        return await sitios.FotosAsync(org, acceso, id, http.RequestAborted) is { } fotos
+            ? Results.Ok(fotos)
+            : Results.Json(new MensajeError(MensajeNoEncontrado), statusCode: StatusCodes.Status404NotFound);
     }
 
     private static async Task<IResult> CrearAsync(SolicitudSitio s, HttpContext http, IRepositorioSitios sitios)
@@ -63,7 +76,7 @@ public static class EndpointsSitios
         var campos = new[] { T(s.Nombre), T(s.Calle), T(s.NumeroExterior), T(s.Colonia), T(s.CodigoPostal), T(s.Municipio), T(s.Estado) };
         if (campos.All(c => c is null)) return "Escribe el nombre o la dirección del sitio.";
         if (campos.Any(c => c?.Length > LargoMaximoCampo)) return $"Cada dato del sitio admite hasta {LargoMaximoCampo} caracteres.";
-        if (s.Latitud is null || s.Longitud is null) return "Elige la ubicación del sitio en el mapa.";
+        if (s.Latitud is null || s.Longitud is null) return MensajeSinUbicacion;
         if (s.Latitud is < -90 or > 90 || s.Longitud is < -180 or > 180) return "La latitud va de -90 a 90 y la longitud de -180 a 180.";
         datos = new DatosSitio(campos[0], campos[1], campos[2], campos[3], campos[4], campos[5], campos[6],
             Math.Round(s.Latitud.Value, 6), Math.Round(s.Longitud.Value, 6));

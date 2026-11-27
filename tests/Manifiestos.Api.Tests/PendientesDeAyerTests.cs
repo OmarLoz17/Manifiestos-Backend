@@ -102,6 +102,19 @@ public sealed class PendientesDeAyerTests(BaseDatosPrueba bd) : IClassFixture<Ba
         """);
 
     [Fact]
+    public async Task Los_pendientes_de_ayer_traen_las_coordenadas_del_sitio()
+    {
+        var yo = await OperadorAsync();
+        var ruta = await RutaAsync(yo.Persona, fosas: 1, "programada", Hoy.AddDays(-1));
+        await bd.SqlComoDuenoAsync($"""
+            INSERT INTO negocio.ficha_sitio(organizacion_id, sucursal_id, sitio_id, revision, nombre, latitud, longitud)
+            SELECT '{Org}', '{Suc}', sitio_id, 1, 'Sitio con punto', 25.686600, -100.316100 FROM negocio.parada_version WHERE parada_id = '{ruta.Parada}';
+            """);
+        var parada = (await PendientesAsync(yo)).Single(j => j.GetProperty("jornadaId").GetGuid() == ruta.Jornada).GetProperty("paradas")[0];
+        Assert.Equal((25.6866m, -100.3161m), (parada.GetProperty("latitud").GetDecimal(), parada.GetProperty("longitud").GetDecimal()));
+    }
+
+    [Fact]
     public async Task Quedan_las_ordenes_sin_hacer_de_ayer_y_nada_de_anteayer()
     {
         var yo = await OperadorAsync();
